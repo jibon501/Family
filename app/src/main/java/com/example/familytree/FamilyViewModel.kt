@@ -14,6 +14,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** বাবা/মা/স্বামী/স্ত্রী: তালিকা থেকে বাছা (id) অথবা নতুন লেখা কাস্টম নাম (newName) */
+data class Link(val id: Long?, val newName: String?)
+
 class FamilyViewModel(app: Application) : AndroidViewModel(app) {
     private val db = AppDatabase.get(app)
     private val dao = db.personDao()
@@ -21,54 +24,93 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
     val persons: StateFlow<List<Person>> = dao.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** সদস্য সেভ করে, তারপর ছেলে/মেয়ে সন্তানদের নাম থাকলে তাদেরও যোগ করে */
-    fun saveWithChildren(person: Person, sons: List<String>, daughters: List<String>) {
+    private fun spouseIdsOf(p: Person, all: List<Person>): Set<Long> =
+        (listOfNotNull(p.spouseId) + all.filter { it.spouseId == p.id && it.id != p.id }.map { it.id }).toSet()
+
+    /**
+     * সদস্য সেভ করে। বাবা/মা/স্ত্রী/স্বামীর নাম তালিকায় না থাকলে নতুন সদস্য হিসেবে বানায়।
+     * তারপর নতুন ছেলে/মেয়ে যোগ করে এবং সন্তানদের নতুন ক্রম (childOrder) সেভ করে।
+     */
+    fun save(
+        person: Person,
+        father: Link,
+        mother: Link,
+        spouses: List<Link>,
+        sons: List<String>,
+        daughters: List<String>,
+        childOrder: List<Long>
+    ) {
         viewModelScope.launch {
             var next = dao.maxOrder() + 1
-            val toSave = if (person.id == 0L) person.copy(sortOrder = next++) else person
-            val id = persist(toSave)
-            val me = dao.getById(id) ?: return@launch
-            val fatherId = if (me.gender == "M") me.id else me.spouseId
-            val motherId = if (me.gender == "F") me.id else me.spouseId
 
-            val newChildren = sons.map { it to "M" } + daughters.map { it to "F" }
-            newChildren
+            suspend fun resolve(l: Link, gender: String): Long? =
+                l.id ?: l.newName?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                    dao.insert(Person(name = it, gender = gender, sortOrder = next++))
+                }
+
+            val fatherId = resolve(father, "M")
+            val motherId = resolve(mother, "F")
+            val allBefore = dao.getAll()
+            val old = if (person.id != 0L) dao.getById(person.id) else null
+            val oldSpouseIds = old?.let { spouseIdsOf(it, allBefore) } ?: emptySet()
+
+            val base = if (person.id == 0L) person.copy(sortOrder = next++) else person
+            val spouseGender = if (base.gender == "M") "F" else "M"
+            val spouseIds = spouses.mapNotNull { resolve(it, spouseGender) }
+                .distinct().filter { it != person.id }
+
+            val toSave = base.copy(
+                fatherId = fatherId,
+                motherId = motherId,
+                // পুরুষের একাধিক স্ত্রী: স্ত্রীর দিকেই সংযোগ থাকে। মহিলার স্বামী: নিজের দিকে
+                spouseId = if (base.gender == "M") null else spouseIds.firstOrNull()
+            )
+            val id = if (toSave.id == 0L) dao.insert(toSave) else {
+                dao.update(toSave); toSave.id
+            }
+
+            // বাদ পড়া স্বামী/স্ত্রীর সংযোগ মুছে ফেলা
+            (oldSpouseIds - spouseIds.toSet()).forEach { sid ->
+                dao.getById(sid)?.let { s -> if (s.spouseId == id) dao.update(s.copy(spouseId = null)) }
+            }
+            // নতুন সংযোগ ও ক্রম
+            if (base.gender == "M") {
+                spouseIds.forEachIndexed { i, sid ->
+                    dao.getById(sid)?.let { dao.update(it.copy(spouseId = id, spouseOrder = i)) }
+                }
+            } else {
+                spouseIds.firstOrNull()?.let { sid ->
+                    if (old?.spouseId != sid) {
+                        val maxOrd = allBefore.filter { it.spouseId == sid }.maxOfOrNull { it.spouseOrder } ?: -1
+                        dao.update(toSave.copy(id = id, spouseOrder = maxOrd + 1))
+                    }
+                }
+            }
+
+            // নতুন ছেলে/মেয়ে (একাধিক স্ত্রী থাকলে প্রথম স্ত্রী মা হবে)
+            val me = dao.getById(id) ?: return@launch
+            val childFather = if (me.gender == "M") me.id else spouseIds.firstOrNull()
+            val childMother = if (me.gender == "F") me.id else spouseIds.firstOrNull()
+            (sons.map { it to "M" } + daughters.map { it to "F" })
                 .filter { it.first.isNotBlank() }
                 .forEach { (name, gender) ->
                     dao.insert(
                         Person(
                             name = name.trim(),
                             gender = gender,
-                            fatherId = fatherId,
-                            motherId = motherId,
+                            fatherId = childFather,
+                            motherId = childMother,
                             sortOrder = next++
                         )
                     )
                 }
+
+            // সন্তানদের নতুন ক্রম
+            childOrder.forEachIndexed { index, cid -> dao.setOrder(cid, index) }
         }
     }
 
-    private suspend fun persist(person: Person): Long {
-        val old = if (person.id != 0L) dao.getById(person.id) else null
-        val id = if (person.id == 0L) dao.insert(person) else {
-            dao.update(person)
-            person.id
-        }
-        // আগের স্বামী/স্ত্রী বদলে গেলে পুরনো সংযোগ মুছে ফেলা
-        val oldSpouse = old?.spouseId
-        if (oldSpouse != null && oldSpouse != person.spouseId) {
-            dao.getById(oldSpouse)?.let { dao.update(it.copy(spouseId = null)) }
-        }
-        // নতুন স্বামী/স্ত্রীর সাথে দুই দিকেই সংযোগ
-        person.spouseId?.let { sid ->
-            dao.getById(sid)?.let { s ->
-                if (s.spouseId != id) dao.update(s.copy(spouseId = id))
-            }
-        }
-        return id
-    }
-
-    /** একই পিতা-মাতার সন্তানদের নতুন ক্রম সেভ করে */
+    /** একই পিতা-মাতার সন্তানদের নতুন ক্রম সেভ করে (টেনে বদলানোর সময়) */
     fun reorder(orderedIds: List<Long>) {
         viewModelScope.launch {
             orderedIds.forEachIndexed { index, id -> dao.setOrder(id, index) }
@@ -133,10 +175,11 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
                     put("motherId", p.motherId ?: JSONObject.NULL)
                     put("spouseId", p.spouseId ?: JSONObject.NULL)
                     put("sortOrder", p.sortOrder)
+                    put("spouseOrder", p.spouseOrder)
                 }
             )
         }
-        return JSONObject().put("app", "FamilyTree").put("version", 1).put("persons", arr).toString(2)
+        return JSONObject().put("app", "FamilyTree").put("version", 2).put("persons", arr).toString(2)
     }
 
     private fun fromJson(text: String): List<Person> {
@@ -151,7 +194,8 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
                 fatherId = if (o.isNull("fatherId")) null else o.getLong("fatherId"),
                 motherId = if (o.isNull("motherId")) null else o.getLong("motherId"),
                 spouseId = if (o.isNull("spouseId")) null else o.getLong("spouseId"),
-                sortOrder = o.optInt("sortOrder", 0)
+                sortOrder = o.optInt("sortOrder", 0),
+                spouseOrder = o.optInt("spouseOrder", 0)
             )
         }
     }

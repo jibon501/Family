@@ -12,7 +12,10 @@ data class Person(
     val birthYear: Int? = null,
     val fatherId: Long? = null,
     val motherId: Long? = null,
+    // স্ত্রীর spouseId = স্বামীর id। একজন স্বামীর একাধিক স্ত্রী থাকতে পারে
     val spouseId: Long? = null,
-    // ভাইবোনদের মধ্যে সাজানোর ক্রম (টেনে বদলানো যায়)
-    @ColumnInfo(defaultValue = "0") val sortOrder: Int = 0
+    // ভাইবোনদের মধ্যে সাজানোর ক্রম
+    @ColumnInfo(defaultValue = "0") val sortOrder: Int = 0,
+    // একাধিক স্ত্রীর মধ্যে সাজানোর ক্রম
+    @ColumnInfo(defaultValue = "0") val spouseOrder: Int = 0
 )
