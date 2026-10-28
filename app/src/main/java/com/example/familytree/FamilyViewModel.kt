@@ -13,6 +13,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /** বাবা/মা/স্বামী/স্ত্রী: তালিকা থেকে বাছা (id) অথবা নতুন লেখা কাস্টম নাম (newName) */
 data class Link(val id: Long?, val newName: String?)
@@ -36,8 +40,7 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
         father: Link,
         mother: Link,
         spouses: List<Link>,
-        sons: List<String>,
-        daughters: List<String>,
+        children: List<String>,
         childOrder: List<Long>
     ) {
         viewModelScope.launch {
@@ -87,23 +90,21 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            // নতুন ছেলে/মেয়ে (একাধিক স্ত্রী থাকলে প্রথম স্ত্রী মা হবে)
+            // নতুন সন্তান (একাধিক স্ত্রী থাকলে প্রথম স্ত্রী মা হবে)
             val me = dao.getById(id) ?: return@launch
             val childFather = if (me.gender == "M") me.id else spouseIds.firstOrNull()
             val childMother = if (me.gender == "F") me.id else spouseIds.firstOrNull()
-            (sons.map { it to "M" } + daughters.map { it to "F" })
-                .filter { it.first.isNotBlank() }
-                .forEach { (name, gender) ->
-                    dao.insert(
-                        Person(
-                            name = name.trim(),
-                            gender = gender,
-                            fatherId = childFather,
-                            motherId = childMother,
-                            sortOrder = next++
-                        )
+            children.filter { it.isNotBlank() }.forEach { name ->
+                dao.insert(
+                    Person(
+                        name = name.trim(),
+                        gender = "M",
+                        fatherId = childFather,
+                        motherId = childMother,
+                        sortOrder = next++
                     )
-                }
+                )
+            }
 
             // সন্তানদের নতুন ক্রম
             childOrder.forEachIndexed { index, cid -> dao.setOrder(cid, index) }
@@ -128,30 +129,51 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- ব্যাকআপ / রিস্টোর ----------
 
-    /** সব সদস্যের তথ্য JSON ফাইলে লেখে */
-    fun backupTo(uri: Uri, onResult: (Boolean) -> Unit) {
+    /** অ্যাপের নিজের ডাটা ফোল্ডার (Android/data/<প্যাকেজ>/files) */
+    private fun backupDir(): File {
+        val app = getApplication<Application>()
+        return (app.getExternalFilesDir(null) ?: app.filesDir).also { it.mkdirs() }
+    }
+
+    /** ডাটা ফোল্ডারে আজকের তারিখ নামে (যেমন 2026-10-28.json) ব্যাকআপ রাখে। সফল হলে ফাইলের পথ দেয় */
+    fun backupToFolder(onResult: (String?) -> Unit) {
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) {
+            val path = withContext(Dispatchers.IO) {
                 runCatching {
-                    val json = toJson(dao.getAll())
-                    getApplication<Application>().contentResolver
-                        .openOutputStream(uri, "wt")!!
-                        .use { it.write(json.toByteArray(Charsets.UTF_8)) }
-                }.isSuccess
+                    val name = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) + ".json"
+                    val f = File(backupDir(), name)
+                    f.writeText(toJson(dao.getAll()), Charsets.UTF_8)
+                    f.absolutePath
+                }.getOrNull()
             }
-            onResult(ok)
+            onResult(path)
         }
     }
 
-    /** JSON ফাইল থেকে পড়ে বর্তমান সব তথ্য বদলে দেয় */
+    /** ডাটা ফোল্ডারের ব্যাকআপ ফাইল, নতুন আগে */
+    fun listBackups(): List<File> =
+        backupDir().listFiles { f -> f.isFile && f.extension == "json" }
+            ?.sortedByDescending { it.name } ?: emptyList()
+
+    fun restoreFromFile(file: File, onResult: (Boolean) -> Unit) {
+        restore(onResult) { file.readText(Charsets.UTF_8) }
+    }
+
+    /** অন্য জায়গার JSON ফাইল থেকে রিস্টোর */
     fun restoreFrom(uri: Uri, onResult: (Boolean) -> Unit) {
+        restore(onResult) {
+            getApplication<Application>().contentResolver
+                .openInputStream(uri)!!
+                .use { it.readBytes().toString(Charsets.UTF_8) }
+        }
+    }
+
+    /** পড়া তথ্য দিয়ে বর্তমান সব তথ্য বদলে দেয় */
+    private fun restore(onResult: (Boolean) -> Unit, read: () -> String) {
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) {
                 runCatching {
-                    val text = getApplication<Application>().contentResolver
-                        .openInputStream(uri)!!
-                        .use { it.readBytes().toString(Charsets.UTF_8) }
-                    val list = fromJson(text)
+                    val list = fromJson(read())
                     db.withTransaction {
                         dao.deleteAll()
                         dao.insertAll(list)

@@ -9,6 +9,7 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -28,18 +29,20 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -47,6 +50,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -57,6 +62,10 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.io.File
 
 /** ডায়ালগ খোলার তথ্য: person = null মানে নতুন সদস্য, সাথে বাবা/মায়ের ডিফল্ট */
 private data class DialogState(
@@ -67,8 +76,8 @@ private data class DialogState(
 
 private enum class Pos { NONE, ONLY, FIRST, MIDDLE, LAST }
 
-/** সেটিংস অনুযায়ী ট্রিতে কী কী দেখানো হবে */
-private data class TreeOpts(val showDaughters: Boolean, val showWives: Boolean)
+/** সেটিংস অনুযায়ী ট্রিতে কী দেখানো হবে: স্ত্রীর নাম, আর যাদের লুকানো হয়েছে */
+private data class TreeOpts(val showWives: Boolean, val hidden: Set<Long>)
 
 /** ডায়ালগের বাবা/মা/স্ত্রী/স্বামীর ঘর: id থাকলে তালিকা থেকে বাছা, না থাকলে লেখা নাম */
 private data class PickEntry(val id: Long?, val text: String)
@@ -140,6 +149,20 @@ private fun assignColors(roots: List<Person>, all: List<Person>): Map<Long, Colo
     return map
 }
 
+/** যাদের নিচে সন্তান আছে (শো/হাইড তালিকার জন্য), গভীরতাসহ */
+private fun branchRows(all: List<Person>): List<Pair<Person, Int>> {
+    val out = ArrayList<Pair<Person, Int>>()
+    fun walk(p: Person, level: Int, path: Set<Long>) {
+        val sp = spousesOf(p, all)
+        val kids = childrenOf(p, sp, all, path)
+        if (kids.isNotEmpty()) out.add(p to level)
+        val np = path + p.id + sp.map { it.id }
+        kids.forEach { walk(it, level + 1, np) }
+    }
+    findRoots(all).forEach { walk(it, 0, emptySet()) }
+    return out
+}
+
 /** কার সন্তান হবে: (বাবা, মা) */
 private fun parentsOf(p: Person, spouse: Person?): Pair<Long?, Long?> =
     if (p.gender == "M") p.id to spouse?.id else spouse?.id to p.id
@@ -153,13 +176,86 @@ private fun Context.findActivity(): Activity? {
     return null
 }
 
+private fun nextLayout(cur: String) = when (cur) { "top" -> "left"; "left" -> "list"; else -> "top" }
+
+/** ট্রির ধরনের বাটনের আইকন (৩ রকম) */
+@Composable
+private fun LayoutIcon(kind: String) {
+    val c = LocalContentColor.current
+    Canvas(Modifier.size(24.dp)) {
+        val u = size.width / 24f
+        val sw = 2f * u
+        fun box(x: Float, y: Float, w: Float, h: Float) =
+            drawRect(c, Offset(x * u, y * u), Size(w * u, h * u))
+        fun line(x1: Float, y1: Float, x2: Float, y2: Float) =
+            drawLine(c, Offset(x1 * u, y1 * u), Offset(x2 * u, y2 * u), sw)
+        when (kind) {
+            "left" -> {
+                box(2f, 9f, 6f, 6f)
+                line(8f, 12f, 12f, 12f); line(12f, 5f, 12f, 19f)
+                line(12f, 5f, 16f, 5f); line(12f, 19f, 16f, 19f)
+                box(16f, 2f, 6f, 6f); box(16f, 16f, 6f, 6f)
+            }
+            "list" -> {
+                box(2f, 2f, 8f, 5f)
+                line(4f, 7f, 4f, 19f)
+                line(4f, 12.5f, 9f, 12.5f); line(4f, 19f, 9f, 19f)
+                box(9f, 10f, 13f, 5f); box(9f, 16.5f, 13f, 5f)
+            }
+            else -> {
+                box(9f, 2f, 6f, 6f)
+                line(12f, 8f, 12f, 12f); line(5f, 12f, 19f, 12f)
+                line(5f, 12f, 5f, 16f); line(19f, 12f, 19f, 16f)
+                box(2f, 16f, 6f, 6f); box(16f, 16f, 6f, 6f)
+            }
+        }
+    }
+}
+
+private class EnterState { var last = 0L; var job: Job? = null }
+
+/**
+ * কিবোর্ডের Enter:
+ *  - একবার: onSingle চলে, একটু পরে কিবোর্ড হাইড হয় ও ঘর থেকে কার্সার উঠে যায়
+ *  - প্রায় ১ সেকেন্ডের মধ্যে আবার (দুইবার) চাপলে onDouble চলে (সংরক্ষণ ও বের হওয়া)
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun enterActions(onSingle: () -> Unit = {}, onDouble: () -> Unit): KeyboardActions {
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val scope = rememberCoroutineScope()
+    val st = remember { EnterState() }
+    val single by rememberUpdatedState(onSingle)
+    val dbl by rememberUpdatedState(onDouble)
+    return KeyboardActions(onDone = {
+        val now = System.currentTimeMillis()
+        if (now - st.last < 1000L) {
+            st.job?.cancel()
+            st.last = 0L
+            dbl()
+        } else {
+            st.last = now
+            single()
+            st.job = scope.launch {
+                delay(800)
+                keyboard?.hide()
+                focus.clearFocus()
+            }
+        }
+    })
+}
+
 @Composable
 fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     val persons by viewModel.persons.collectAsStateWithLifecycle()
     var dialog by remember { mutableStateOf<DialogState?>(null) }
-    var menuOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
-    var pendingRestore by remember { mutableStateOf<Uri?>(null) }
+    var showHideOpen by remember { mutableStateOf(false) }
+    var restoreListOpen by remember { mutableStateOf(false) }
+    var aboutOpen by remember { mutableStateOf(false) }
+    var pendingUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingFile by remember { mutableStateOf<File?>(null) }
     // নতুন সদস্য যোগের সময় বাবা-মায়ের ডিফল্ট (আগের বার যা ছিল)
     var defaultParents by remember { mutableStateOf<Pair<Long?, Long?>>(null to null) }
     val context = LocalContext.current
@@ -169,18 +265,9 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
             .getOrNull().orEmpty()
     }
 
-    val backupLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        if (uri != null) {
-            viewModel.backupTo(uri) { ok ->
-                Toast.makeText(context, if (ok) "ব্যাকআপ সম্পন্ন হয়েছে" else "ব্যাকআপ ব্যর্থ হয়েছে", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
     val restoreLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
-    ) { uri -> if (uri != null) pendingRestore = uri }
+    ) { uri -> if (uri != null) pendingUri = uri }
 
     Scaffold(
         floatingActionButton = {
@@ -188,6 +275,10 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // ট্রির ধরন বদলানোর বাটন (চাপলে ১ → ২ → ৩ → ১)
+                SmallFloatingActionButton(onClick = { settings.updateLayout(nextLayout(settings.layout)) }) {
+                    LayoutIcon(settings.layout)
+                }
                 // স্ক্রিন ঘোরানোর বাটন
                 SmallFloatingActionButton(onClick = {
                     val landscape = context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -214,23 +305,25 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                     )
                 }
             } else {
-                val roots = remember(persons) { findRoots(persons) }
-                val colors = remember(persons) { assignColors(roots, persons) }
-                val opts = TreeOpts(settings.showDaughters, settings.showWives)
+                val allRoots = remember(persons) { findRoots(persons) }
+                val colors = remember(persons) { assignColors(allRoots, persons) }
+                val roots = allRoots.filter { it.id !in settings.hidden }
+                val opts = TreeOpts(settings.showWives, settings.hidden)
                 val onEdit: (Person, Person?) -> Unit = { p, sp ->
                     defaultParents = parentsOf(p, sp)
                     dialog = DialogState(p)
                 }
+                // তিন ধরনেই জুম ইন-আউট ও টেনে সরানো যায়
                 when (settings.layout) {
                     "list" -> {
-                        Column(
-                            Modifier.fillMaxSize()
-                                .verticalScroll(rememberScrollState())
-                                .padding(start = 16.dp, end = 16.dp, top = 48.dp, bottom = 96.dp)
-                        ) {
-                            roots.forEach { root ->
-                                ListNode(root, persons, emptySet(), 0, colors, opts, onEdit)
-                                Spacer(Modifier.height(12.dp))
+                        ZoomPanBox(Modifier.fillMaxSize(), fitWidthOnly = true) {
+                            Column(
+                                Modifier.padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 96.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                roots.forEach { root ->
+                                    ListNode(root, persons, emptySet(), true, true, colors, opts, onEdit)
+                                }
                             }
                         }
                     }
@@ -266,53 +359,88 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                 }
             }
 
-            // উপরের ডানে ছোট মেনু (সেটিংস / ব্যাকআপ / রিস্টোর)
-            Box(Modifier.align(Alignment.TopEnd)) {
-                IconButton(onClick = { menuOpen = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "মেনু")
+            // নিচে বামে: সেটিংস ও About বাটন
+            Row(
+                Modifier.align(Alignment.BottomStart).padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilledTonalIconButton(onClick = { settingsOpen = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "সেটিংস")
                 }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text("সেটিংস") },
-                        onClick = { menuOpen = false; settingsOpen = true }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("ব্যাকআপ নিন") },
-                        onClick = { menuOpen = false; backupLauncher.launch("family-tree-backup.json") }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("ব্যাকআপ রিস্টোর করুন") },
-                        onClick = { menuOpen = false; restoreLauncher.launch(arrayOf("*/*")) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("সংস্করণ $version") },
-                        enabled = false,
-                        onClick = {}
-                    )
-                }
+                FilledTonalButton(onClick = { aboutOpen = true }) { Text("About") }
             }
         }
     }
 
     if (settingsOpen) {
-        SettingsDialog(settings) { settingsOpen = false }
+        SettingsDialog(
+            settings = settings,
+            onShowHide = { showHideOpen = true },
+            onBackup = {
+                viewModel.backupToFolder { path ->
+                    Toast.makeText(
+                        context,
+                        if (path != null) "ব্যাকআপ সংরক্ষিত হয়েছে:\n$path" else "ব্যাকআপ ব্যর্থ হয়েছে",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            },
+            onRestore = { restoreListOpen = true },
+            onDismiss = { settingsOpen = false }
+        )
     }
 
-    pendingRestore?.let { uri ->
+    if (showHideOpen) {
+        ShowHideDialog(persons, settings) { showHideOpen = false }
+    }
+
+    if (restoreListOpen) {
+        val files = remember { viewModel.listBackups() }
+        RestoreListDialog(
+            files = files,
+            onPick = { restoreListOpen = false; pendingFile = it },
+            onOther = { restoreListOpen = false; restoreLauncher.launch(arrayOf("*/*")) },
+            onDismiss = { restoreListOpen = false }
+        )
+    }
+
+    if (aboutOpen) {
         AlertDialog(
-            onDismissRequest = { pendingRestore = null },
+            onDismissRequest = { aboutOpen = false },
+            title = { Text("আমার বংশতালিকা") },
+            text = {
+                Text("সংস্করণ $version\n\nপরিবারের সদস্যদের নিয়ে বংশতালিকা বানানোর অফলাইন অ্যাপ। সব তথ্য আপনার ফোনেই থাকে।")
+            },
+            confirmButton = { TextButton(onClick = { aboutOpen = false }) { Text("ঠিক আছে") } }
+        )
+    }
+
+    if (pendingUri != null || pendingFile != null) {
+        val cancel = { pendingUri = null; pendingFile = null }
+        AlertDialog(
+            onDismissRequest = cancel,
             properties = DialogProperties(dismissOnClickOutside = false),
             title = { Text("রিস্টোর নিশ্চিত করুন") },
             text = { Text("বর্তমান সব তথ্য মুছে গিয়ে ব্যাকআপ ফাইলের তথ্য বসবে। চালিয়ে যাবেন?") },
             confirmButton = {
                 TextButton(onClick = {
-                    pendingRestore = null
-                    viewModel.restoreFrom(uri) { ok ->
-                        Toast.makeText(context, if (ok) "রিস্টোর সম্পন্ন হয়েছে" else "রিস্টোর ব্যর্থ: ফাইলটি সঠিক নয়", Toast.LENGTH_LONG).show()
+                    val uri = pendingUri
+                    val file = pendingFile
+                    pendingUri = null; pendingFile = null
+                    val done: (Boolean) -> Unit = { ok ->
+                        if (ok) settings.clearHidden()
+                        Toast.makeText(
+                            context,
+                            if (ok) "রিস্টোর সম্পন্ন হয়েছে" else "রিস্টোর ব্যর্থ: ফাইলটি সঠিক নয়",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
+                    if (file != null) viewModel.restoreFromFile(file, done)
+                    else if (uri != null) viewModel.restoreFrom(uri, done)
                 }) { Text("হ্যাঁ, রিস্টোর করুন") }
             },
-            dismissButton = { TextButton(onClick = { pendingRestore = null }) { Text("বাতিল") } }
+            dismissButton = { TextButton(onClick = cancel) { Text("বাতিল") } }
         )
     }
 
@@ -321,8 +449,8 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
             state = state,
             all = persons,
             onDismiss = { dialog = null },
-            onSave = { p, father, mother, spouses, sons, daughters, childOrder ->
-                viewModel.save(p, father, mother, spouses, sons, daughters, childOrder)
+            onSave = { p, father, mother, spouses, children, childOrder ->
+                viewModel.save(p, father, mother, spouses, children, childOrder)
                 // নতুন সদস্য যোগ করলে পরেরবারও একই বাবা-মা ডিফল্ট থাকবে
                 if (p.id == 0L && (father.id != null || mother.id != null)) {
                     defaultParents = father.id to mother.id
@@ -354,7 +482,13 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
 }
 
 @Composable
-private fun SettingsDialog(settings: AppSettings, onDismiss: () -> Unit) {
+private fun SettingsDialog(
+    settings: AppSettings,
+    onShowHide: () -> Unit,
+    onBackup: () -> Unit,
+    onRestore: () -> Unit,
+    onDismiss: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("সেটিংস") },
@@ -366,26 +500,89 @@ private fun SettingsDialog(settings: AppSettings, onDismiss: () -> Unit) {
                 ChoiceRow("রাত (নাইট)", settings.theme == "night") { settings.updateTheme("night") }
 
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                SwitchRow("মেয়েদের নাম দেখান", settings.showDaughters) { settings.updateShowDaughters(it) }
                 SwitchRow("স্ত্রীর নাম দেখান", settings.showWives) { settings.updateShowWives(it) }
 
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Text("ট্রির ধরন", style = MaterialTheme.typography.labelLarge)
-                ChoiceRow("উপর থেকে নিচে", settings.layout == "top") { settings.updateLayout("top") }
-                ChoiceRow("বাম থেকে ডানে", settings.layout == "left") { settings.updateLayout("left") }
-                ChoiceRow("তালিকা", settings.layout == "list") { settings.updateLayout("list") }
+                OutlinedButton(onClick = onShowHide, modifier = Modifier.fillMaxWidth()) { Text("শো/হাইড") }
+                OutlinedButton(onClick = onBackup, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ নিন") }
+                OutlinedButton(onClick = onRestore, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ রিস্টোর করুন") }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("ঠিক আছে") } }
     )
 }
 
+/** যাদের নিচে ট্রি আছে তাদের নাম; বন্ধ করলে সেই নাম ও তার নিচের সবাই লুকায় */
+@Composable
+private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: () -> Unit) {
+    val rows = remember(all) { branchRows(all) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("শো/হাইড") },
+        text = {
+            if (rows.isEmpty()) {
+                Text("যাদের নিচে ট্রি আছে এমন কোনো নাম এখনো নেই।")
+            } else {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "বন্ধ করলে সেই নাম ও তার নিচের সব নাম লুকাবে।",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    rows.forEach { (p, level) ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = (level * 16).dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(p.name, Modifier.weight(1f))
+                            Switch(
+                                checked = p.id !in settings.hidden,
+                                onCheckedChange = { settings.toggleHidden(p.id) }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("ঠিক আছে") } }
+    )
+}
+
+@Composable
+private fun RestoreListDialog(
+    files: List<File>,
+    onPick: (File) -> Unit,
+    onOther: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("ব্যাকআপ রিস্টোর") },
+        text = {
+            if (files.isEmpty()) {
+                Text("ডাটা ফোল্ডারে কোনো ব্যাকআপ পাওয়া যায়নি।")
+            } else {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    files.forEach { f ->
+                        TextButton(onClick = { onPick(f) }, modifier = Modifier.fillMaxWidth()) {
+                            Text(f.nameWithoutExtension)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onOther) { Text("অন্য ফাইল বাছুন") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("বাতিল") } }
+    )
+}
+
 /**
  * দুই আঙুলে জুম ইন/আউট ও টেনে সরানো। জুম আউট করলে সর্বোচ্চ ততটুকু যাবে
  * যতটুকুতে পুরো ট্রি স্ক্রিনে ধরে। শুরুতেই পুরো ট্রি স্ক্রিনে ফিট হয়।
+ * fitWidthOnly = true হলে (তালিকার জন্য) শুধু প্রস্থ ফিট হয়, উপর-নিচে টেনে দেখা যায়।
  */
 @Composable
-private fun ZoomPanBox(modifier: Modifier, content: @Composable () -> Unit) {
+private fun ZoomPanBox(modifier: Modifier, fitWidthOnly: Boolean = false, content: @Composable () -> Unit) {
     var container by remember { mutableStateOf(IntSize.Zero) }
     var contentSize by remember { mutableStateOf(IntSize.Zero) }
     var scale by remember { mutableFloatStateOf(1f) }
@@ -395,7 +592,7 @@ private fun ZoomPanBox(modifier: Modifier, content: @Composable () -> Unit) {
         if (container == IntSize.Zero || contentSize == IntSize.Zero) return 1f
         val sx = container.width.toFloat() / contentSize.width
         val sy = container.height.toFloat() / contentSize.height
-        return minOf(1f, sx, sy)
+        return if (fitWidthOnly) minOf(1f, sx) else minOf(1f, sx, sy)
     }
 
     fun clampOffset(s: Float, o: Offset): Offset {
@@ -408,7 +605,7 @@ private fun ZoomPanBox(modifier: Modifier, content: @Composable () -> Unit) {
         return Offset(x, y)
     }
 
-    // ট্রির আকার বা স্ক্রিন (portrait/landscape) বদলালে আবার পুরো ট্রি ফিট করা
+    // ট্রির আকার বা স্ক্রিন (portrait/landscape) বদলালে আবার ফিট করা
     LaunchedEffect(container, contentSize) {
         if (container != IntSize.Zero && contentSize != IntSize.Zero) {
             scale = fitScale()
@@ -452,7 +649,7 @@ private class DragCallbacks(
     val onCancel: () -> Unit
 )
 
-/** ট্রি (উপর থেকে নিচে)। সবার উপরের নাম মাঝখানে, স্বামী/স্ত্রীরা তার নিচে */
+/** ট্রি (উপর থেকে নিচে): প্রতিটি নাম মাঝখানে, স্বামী/স্ত্রীরা তার নিচে, তার নিচে সন্তানরা */
 @Composable
 private fun TreeNode(
     person: Person,
@@ -468,8 +665,7 @@ private fun TreeNode(
 ) {
     val spouses = spousesOf(person, all)
     val shownSpouses = if (opts.showWives) spouses else emptyList()
-    val children = childrenOf(person, spouses, all, path)
-        .filter { opts.showDaughters || it.gender != "F" }
+    val children = childrenOf(person, spouses, all, path).filter { it.id !in opts.hidden }
     val color = colors[person.id] ?: Palette[0]
     val childColor = children.firstOrNull()?.let { colors[it.id] } ?: color
     val firstSpouse = spouses.firstOrNull()
@@ -496,20 +692,11 @@ private fun TreeNode(
             ),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (pos == Pos.NONE && shownSpouses.isNotEmpty()) {
-            // সবার উপরের নাম মাঝখানে, স্ত্রীরা নিচের সারিতে
-            NameButton(person.name, color, dragHandler) { onEdit(person, firstSpouse) }
+        NameButton(person.name, color, dragHandler) { onEdit(person, firstSpouse) }
+        if (shownSpouses.isNotEmpty()) {
             Box(Modifier.width(3.dp).height(10.dp).background(color))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 shownSpouses.forEach { s ->
-                    NameButton(s.name, color, null) { onEdit(s, person) }
-                }
-            }
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                NameButton(person.name, color, dragHandler) { onEdit(person, firstSpouse) }
-                shownSpouses.forEach { s ->
-                    Box(Modifier.width(10.dp).height(3.dp).background(color))
                     NameButton(s.name, color, null) { onEdit(s, person) }
                 }
             }
@@ -592,8 +779,7 @@ private fun HTreeNode(
 ) {
     val spouses = spousesOf(person, all)
     val shownSpouses = if (opts.showWives) spouses else emptyList()
-    val children = childrenOf(person, spouses, all, path)
-        .filter { opts.showDaughters || it.gender != "F" }
+    val children = childrenOf(person, spouses, all, path).filter { it.id !in opts.hidden }
     val color = colors[person.id] ?: Palette[0]
     val childColor = children.firstOrNull()?.let { colors[it.id] } ?: color
 
@@ -641,38 +827,51 @@ private fun HTreeNode(
     }
 }
 
-/** তালিকা: প্রজন্ম অনুযায়ী ভেতরে সরিয়ে সাজানো */
+/** তালিকা: প্রজন্ম অনুযায়ী ভেতরে সরিয়ে সাজানো, কানেকশন লাইনসহ */
 @Composable
 private fun ListNode(
     person: Person,
     all: List<Person>,
     path: Set<Long>,
-    level: Int,
+    isRoot: Boolean,
+    isLast: Boolean,
     colors: Map<Long, Color>,
     opts: TreeOpts,
     onEdit: (Person, Person?) -> Unit
 ) {
     val spouses = spousesOf(person, all)
     val shownSpouses = if (opts.showWives) spouses else emptyList()
-    val children = childrenOf(person, spouses, all, path)
-        .filter { opts.showDaughters || it.gender != "F" }
+    val children = childrenOf(person, spouses, all, path).filter { it.id !in opts.hidden }
     val color = colors[person.id] ?: Palette[0]
     val newPath = path + person.id + spouses.map { it.id }
+    var rowH by remember { mutableIntStateOf(0) }
 
-    Column {
+    Column(
+        Modifier
+            .drawBehind {
+                if (!isRoot) {
+                    val sw = 3.dp.toPx()
+                    val x = 8.dp.toPx()
+                    val cy = rowH / 2f
+                    // উপর থেকে নামা লাইন (শেষ সন্তান হলে নিজের নাম পর্যন্ত), তারপর নামের দিকে আড়াআড়ি লাইন
+                    drawLine(color, Offset(x, 0f), Offset(x, if (isLast) cy else size.height), sw)
+                    drawLine(color, Offset(x, cy), Offset(22.dp.toPx(), cy), sw)
+                }
+            }
+            .padding(start = if (isRoot) 0.dp else 22.dp)
+    ) {
         Row(
-            Modifier.padding(start = (level * 22).dp, top = 4.dp, bottom = 4.dp),
+            Modifier.onSizeChanged { rowH = it.height }.padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (level > 0) Box(Modifier.width(12.dp).height(3.dp).background(color))
             NameButton(person.name, color, null) { onEdit(person, spouses.firstOrNull()) }
             shownSpouses.forEach { s ->
                 Box(Modifier.width(8.dp).height(3.dp).background(color))
                 NameButton(s.name, color, null) { onEdit(s, person) }
             }
         }
-        children.forEach { child ->
-            ListNode(child, all, newPath, level + 1, colors, opts, onEdit)
+        children.forEachIndexed { i, child ->
+            ListNode(child, all, newPath, false, i == children.lastIndex, colors, opts, onEdit)
         }
     }
 }
@@ -728,6 +927,7 @@ private fun PersonPicker(
     options: List<Person>,
     entry: PickEntry,
     modifier: Modifier = Modifier,
+    onDoubleEnter: () -> Unit,
     onChange: (PickEntry) -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -740,6 +940,8 @@ private fun PersonPicker(
             onValueChange = { onChange(PickEntry(null, it)) },
             label = { Text(label) },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = enterActions(onDouble = onDoubleEnter),
             trailingIcon = if (entry.text.isNotEmpty()) {
                 {
                     IconButton(onClick = { onChange(PickEntry(null, "")) }) {
@@ -765,8 +967,8 @@ private fun PersonPicker(
 }
 
 /**
- * সন্তানের নাম লিখে কিবোর্ডের এন্টার চাপলে নামটি তালিকায় যুক্ত হয়ে ঘর ফাঁকা হবে।
- * ঘর ফাঁকা থাকা অবস্থায় আবার এন্টার চাপলে (মানে পর পর দুইবার) সব সংরক্ষিত হয়ে বন্ধ হবে।
+ * সন্তানের নাম লিখে একবার Enter দিলে নামটি তালিকায় যুক্ত হয়, ঘর ফাঁকা হয়, কিবোর্ড হাইড হয়।
+ * দ্রুত দুইবার Enter দিলে সব সংরক্ষিত হয়ে বন্ধ হয়।
  */
 @Composable
 private fun NameListEditor(
@@ -774,7 +976,7 @@ private fun NameListEditor(
     names: SnapshotStateList<String>,
     pending: String,
     onPendingChange: (String) -> Unit,
-    onSubmitEmpty: () -> Unit
+    onDoubleEnter: () -> Unit
 ) {
     fun add() {
         val n = pending.trim()
@@ -797,10 +999,10 @@ private fun NameListEditor(
             singleLine = true,
             label = { Text("নাম লিখে এন্টার চাপুন") },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = {
-                if (pending.trim().isNotEmpty()) add()
-                else if (names.isNotEmpty()) onSubmitEmpty()
-            }),
+            keyboardActions = enterActions(
+                onSingle = { if (pending.trim().isNotEmpty()) add() },
+                onDouble = onDoubleEnter
+            ),
             trailingIcon = {
                 IconButton(onClick = { add() }) {
                     Icon(Icons.Default.Add, contentDescription = "যোগ করুন")
@@ -816,7 +1018,7 @@ private fun PersonDialog(
     state: DialogState,
     all: List<Person>,
     onDismiss: () -> Unit,
-    onSave: (Person, Link, Link, List<Link>, List<String>, List<String>, List<Long>) -> Unit,
+    onSave: (Person, Link, Link, List<Link>, List<String>, List<Long>) -> Unit,
     onDelete: (Person) -> Unit
 ) {
     val person = state.person
@@ -840,10 +1042,8 @@ private fun PersonDialog(
         person?.let { p -> childrenOf(p, spousesOf(p, all), all, emptySet()).map { it.id } } ?: emptyList()
     }
     val childOrder = remember { mutableStateListOf<Long>().apply { addAll(myChildren) } }
-    val sons = remember { mutableStateListOf<String>() }
-    val daughters = remember { mutableStateListOf<String>() }
-    var sonPending by remember { mutableStateOf("") }
-    var daughterPending by remember { mutableStateOf("") }
+    val newChildren = remember { mutableStateListOf<String>() }
+    var childPending by remember { mutableStateOf("") }
 
     val others = all.filter { it.id != person?.id }
     val fatherOptions = others.filter { it.gender == "M" }
@@ -865,8 +1065,7 @@ private fun PersonDialog(
                 toLink(father, fatherOptions),
                 toLink(mother, motherOptions),
                 spouseEntries.map { toLink(it, spouseOptions) }.filter { it.id != null || it.newName != null },
-                sons.toList() + sonPending.trim(),
-                daughters.toList() + daughterPending.trim(),
+                newChildren.toList() + childPending.trim(),
                 if (childOrder.toList() != myChildren) childOrder.toList() else emptyList()
             )
         }
@@ -884,12 +1083,16 @@ private fun PersonDialog(
             ) {
                 OutlinedTextField(
                     value = name, onValueChange = { name = it },
-                    label = { Text("নাম") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                    label = { Text("নাম") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = enterActions(onDouble = save),
+                    modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
                     value = year, onValueChange = { year = it.filter(Char::isDigit).take(4) },
                     label = { Text("জন্মসাল (ঐচ্ছিক)") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                    keyboardActions = enterActions(onDouble = save),
                     modifier = Modifier.fillMaxWidth()
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -899,8 +1102,8 @@ private fun PersonDialog(
                     RadioButton(selected = gender == "F", onClick = { gender = "F" })
                     Text("মহিলা")
                 }
-                PersonPicker("বাবা", fatherOptions, father) { father = it }
-                PersonPicker("মা", motherOptions, mother) { mother = it }
+                PersonPicker("বাবা", fatherOptions, father, onDoubleEnter = save) { father = it }
+                PersonPicker("মা", motherOptions, mother, onDoubleEnter = save) { mother = it }
 
                 // স্বামী / স্ত্রী (একাধিক স্ত্রী)
                 val spouseLabel = if (gender == "M") "স্ত্রী" else "স্বামী"
@@ -912,7 +1115,8 @@ private fun PersonDialog(
                             label = if (multi && spouses.size > 1) "$spouseLabel ${i + 1}" else spouseLabel,
                             options = spouseOptions,
                             entry = entry,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            onDoubleEnter = save
                         ) { spouses[i] = it }
                         if (multi && spouses.size > 1) {
                             IconButton(
@@ -940,17 +1144,14 @@ private fun PersonDialog(
                     }
                 }
 
-                // বর্তমান ছেলে-মেয়ে: ক্রম ঠিক করা যাবে
+                // বর্তমান সন্তান: ক্রম ঠিক করা যাবে
                 if (childOrder.isNotEmpty()) {
                     HorizontalDivider()
-                    Text("ছেলে-মেয়ে (ক্রম ঠিক করুন)", style = MaterialTheme.typography.labelMedium)
+                    Text("সন্তান (ক্রম ঠিক করুন)", style = MaterialTheme.typography.labelMedium)
                     childOrder.forEachIndexed { i, cid ->
                         val c = all.find { it.id == cid }
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                "${i + 1}. ${c?.name.orEmpty()} (${if (c?.gender == "F") "মেয়ে" else "ছেলে"})",
-                                Modifier.weight(1f)
-                            )
+                            Text("${i + 1}. ${c?.name.orEmpty()}", Modifier.weight(1f))
                             IconButton(
                                 enabled = i > 0,
                                 onClick = { val t = childOrder[i]; childOrder[i] = childOrder[i - 1]; childOrder[i - 1] = t },
@@ -966,8 +1167,7 @@ private fun PersonDialog(
                 }
 
                 HorizontalDivider()
-                NameListEditor("ছেলে সন্তান", sons, sonPending, { sonPending = it }, save)
-                NameListEditor("মেয়ে সন্তান", daughters, daughterPending, { daughterPending = it }, save)
+                NameListEditor("সন্তান", newChildren, childPending, { childPending = it }, save)
             }
         },
         confirmButton = {
