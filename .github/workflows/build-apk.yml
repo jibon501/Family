@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write   # Release তৈরি করতে লাগবে
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,3 +30,15 @@ jobs:
         with:
           name: FamilyTree-release-apk
           path: app/build/outputs/apk/release/app-release.apk
+
+      - name: APK-এর নাম ঠিক করা
+        run: cp app/build/outputs/apk/release/app-release.apk "FamilyTree-v1.${{ github.run_number }}.apk"
+
+      - name: GitHub Release তৈরি
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v1.${{ github.run_number }}" "FamilyTree-v1.${{ github.run_number }}.apk" \
+            --title "আমার বংশতালিকা v1.${{ github.run_number }}" \
+            --notes "স্বয়ংক্রিয় বিল্ড (commit ${{ github.sha }})" \
+            --target "${{ github.sha }}"
