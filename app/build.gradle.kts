@@ -5,6 +5,11 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// সংস্করণ: GitHub বিল্ডের নম্বর অনুযায়ী 1.1, 1.2, 1.3 ...
+val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+val buildOffset = System.getenv("BUILD_OFFSET")?.toIntOrNull() ?: 0
+val buildNo = maxOf(runNumber - buildOffset, 1)
+
 android {
     namespace = "com.example.familytree"
     compileSdk = 34
@@ -13,8 +18,8 @@ android {
         applicationId = "com.example.familytree"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = runNumber
+        versionName = "1.$buildNo"
     }
 
     signingConfigs {

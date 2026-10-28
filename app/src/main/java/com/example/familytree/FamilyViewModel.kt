@@ -24,7 +24,9 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
     /** সদস্য সেভ করে, তারপর ছেলে/মেয়ে সন্তানদের নাম থাকলে তাদেরও যোগ করে */
     fun saveWithChildren(person: Person, sons: List<String>, daughters: List<String>) {
         viewModelScope.launch {
-            val id = persist(person)
+            var next = dao.maxOrder() + 1
+            val toSave = if (person.id == 0L) person.copy(sortOrder = next++) else person
+            val id = persist(toSave)
             val me = dao.getById(id) ?: return@launch
             val fatherId = if (me.gender == "M") me.id else me.spouseId
             val motherId = if (me.gender == "F") me.id else me.spouseId
@@ -38,7 +40,8 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
                             name = name.trim(),
                             gender = gender,
                             fatherId = fatherId,
-                            motherId = motherId
+                            motherId = motherId,
+                            sortOrder = next++
                         )
                     )
                 }
@@ -63,6 +66,13 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         return id
+    }
+
+    /** একই পিতা-মাতার সন্তানদের নতুন ক্রম সেভ করে */
+    fun reorder(orderedIds: List<Long>) {
+        viewModelScope.launch {
+            orderedIds.forEachIndexed { index, id -> dao.setOrder(id, index) }
+        }
     }
 
     fun delete(person: Person) {
@@ -122,6 +132,7 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
                     put("fatherId", p.fatherId ?: JSONObject.NULL)
                     put("motherId", p.motherId ?: JSONObject.NULL)
                     put("spouseId", p.spouseId ?: JSONObject.NULL)
+                    put("sortOrder", p.sortOrder)
                 }
             )
         }
@@ -139,7 +150,8 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
                 birthYear = if (o.isNull("birthYear")) null else o.getInt("birthYear"),
                 fatherId = if (o.isNull("fatherId")) null else o.getLong("fatherId"),
                 motherId = if (o.isNull("motherId")) null else o.getLong("motherId"),
-                spouseId = if (o.isNull("spouseId")) null else o.getLong("spouseId")
+                spouseId = if (o.isNull("spouseId")) null else o.getLong("spouseId"),
+                sortOrder = o.optInt("sortOrder", 0)
             )
         }
     }

@@ -31,6 +31,12 @@ interface PersonDao {
     @Delete
     suspend fun delete(person: Person)
 
+    @Query("UPDATE persons SET sortOrder = :order WHERE id = :id")
+    suspend fun setOrder(id: Long, order: Int)
+
+    @Query("SELECT COALESCE(MAX(sortOrder), 0) FROM persons")
+    suspend fun maxOrder(): Int
+
     @Query("DELETE FROM persons")
     suspend fun deleteAll()
 
