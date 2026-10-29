@@ -19,7 +19,7 @@ import java.util.Date
 import java.util.Locale
 
 /** বাবা/মা/স্বামী/স্ত্রী: তালিকা থেকে বাছা (id) অথবা নতুন লেখা কাস্টম নাম (newName) */
-data class Link(val id: Long?, val newName: String?)
+data class Link(val id: Long?, val newName: String?, val rename: String? = null)
 
 class FamilyViewModel(app: Application) : AndroidViewModel(app) {
     private val db = AppDatabase.get(app)
@@ -32,8 +32,8 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
         (listOfNotNull(p.spouseId) + all.filter { it.spouseId == p.id && it.id != p.id }.map { it.id }).toSet()
 
     /**
-     * সদস্য সেভ করে। বাবা/মা/স্ত্রী/স্বামীর নাম তালিকায় না থাকলে নতুন সদস্য হিসেবে বানায়।
-     * তারপর নতুন ছেলে/মেয়ে যোগ করে এবং সন্তানদের নতুন ক্রম (childOrder) সেভ করে।
+     * সদস্য সেভ করে। বাবা/মা/স্ত্রীর নাম তালিকায় না থাকলে নতুন সদস্য হিসেবে বানায়।
+     * তারপর নতুন সন্তান যোগ করে এবং সন্তানদের নতুন ক্রম (childOrder) সেভ করে।
      */
     fun save(
         person: Person,
@@ -46,10 +46,18 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             var next = dao.maxOrder() + 1
 
-            suspend fun resolve(l: Link, gender: String): Long? =
-                l.id ?: l.newName?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            suspend fun resolve(l: Link, gender: String): Long? {
+                if (l.id != null) {
+                    // আগের সদস্যের নাম বদলানো হলে নতুন নামে সেভ
+                    l.rename?.trim()?.takeIf { it.isNotEmpty() }?.let { n ->
+                        dao.getById(l.id)?.let { if (it.name != n) dao.update(it.copy(name = n)) }
+                    }
+                    return l.id
+                }
+                return l.newName?.trim()?.takeIf { it.isNotEmpty() }?.let {
                     dao.insert(Person(name = it, gender = gender, sortOrder = next++))
                 }
+            }
 
             val fatherId = resolve(father, "M")
             val motherId = resolve(mother, "F")
@@ -62,11 +70,12 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
             val spouseIds = spouses.mapNotNull { resolve(it, spouseGender) }
                 .distinct().filter { it != person.id }
 
+            // আগে যার দিকে নিজের সংযোগ ছিল (যেমন স্বামী), সে তালিকায় থাকলে সংযোগ আগের মতোই থাকবে
+            val keepOwnLink = old?.spouseId?.takeIf { it in spouseIds }
             val toSave = base.copy(
                 fatherId = fatherId,
                 motherId = motherId,
-                // পুরুষের একাধিক স্ত্রী: স্ত্রীর দিকেই সংযোগ থাকে। মহিলার স্বামী: নিজের দিকে
-                spouseId = if (base.gender == "M") null else spouseIds.firstOrNull()
+                spouseId = keepOwnLink
             )
             val id = if (toSave.id == 0L) dao.insert(toSave) else {
                 dao.update(toSave); toSave.id
@@ -77,16 +86,10 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
                 dao.getById(sid)?.let { s -> if (s.spouseId == id) dao.update(s.copy(spouseId = null)) }
             }
             // নতুন সংযোগ ও ক্রম
-            if (base.gender == "M") {
-                spouseIds.forEachIndexed { i, sid ->
+            // নতুন স্ত্রীদের সংযোগ স্ত্রীর দিকে থাকে (স্ত্রীর spouseId = এই সদস্যের id)
+            spouseIds.forEachIndexed { i, sid ->
+                if (sid != keepOwnLink) {
                     dao.getById(sid)?.let { dao.update(it.copy(spouseId = id, spouseOrder = i)) }
-                }
-            } else {
-                spouseIds.firstOrNull()?.let { sid ->
-                    if (old?.spouseId != sid) {
-                        val maxOrd = allBefore.filter { it.spouseId == sid }.maxOfOrNull { it.spouseOrder } ?: -1
-                        dao.update(toSave.copy(id = id, spouseOrder = maxOrd + 1))
-                    }
                 }
             }
 

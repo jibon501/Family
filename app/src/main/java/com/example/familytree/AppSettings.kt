@@ -26,6 +26,15 @@ class AppSettings(context: Context) {
     )
         private set
 
+    /** হাইড/আনহাইড বাটন: true হলে শো/হাইড তালিকার লুকানো নামগুলো সত্যিই লুকানো থাকে, false হলে সব দেখায় */
+    var hideActive by mutableStateOf(prefs.getBoolean("hideActive", true))
+        private set
+
+    fun toggleHideActive() {
+        hideActive = !hideActive
+        prefs.edit().putBoolean("hideActive", hideActive).apply()
+    }
+
     fun updateTheme(v: String) { theme = v; prefs.edit().putString("theme", v).apply() }
     fun updateShowWives(v: Boolean) { showWives = v; prefs.edit().putBoolean("showWives", v).apply() }
     fun updateLayout(v: String) { layout = v; prefs.edit().putString("layout", v).apply() }
