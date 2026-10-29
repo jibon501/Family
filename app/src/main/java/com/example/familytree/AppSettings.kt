@@ -40,8 +40,14 @@ class AppSettings(context: Context) {
     fun updateLayout(v: String) { layout = v; prefs.edit().putString("layout", v).apply() }
 
     fun toggleHidden(id: Long) {
-        hidden = if (id in hidden) hidden - id else hidden + id
+        val hiding = id !in hidden
+        hidden = if (hiding) hidden + id else hidden - id
         saveHidden()
+        // কোনো নাম লুকাতে চাইলে হাইড চালু না থাকলে চালু করে দেওয়া, যাতে পরিবর্তন সাথে সাথে চোখে পড়ে
+        if (hiding && !hideActive) {
+            hideActive = true
+            prefs.edit().putBoolean("hideActive", true).apply()
+        }
     }
 
     fun clearHidden() {
