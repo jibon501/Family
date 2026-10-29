@@ -421,7 +421,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     LaunchedEffect(settings.layout, replay, persons.isNotEmpty()) {
         animDone = false
         lineT.snapTo(0f)
-        lineT.animateTo(totalNow.toFloat(), tween((totalNow * 250).coerceAtLeast(1), easing = LinearEasing))
+        lineT.animateTo(totalNow.toFloat(), tween((totalNow * 140).coerceAtLeast(1), easing = LinearEasing))
         lineT.snapTo(totalNow.toFloat())
         animDone = true
     }
@@ -539,7 +539,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                 }
             }
 
-            // নিচের মাঝখানে ৫টি বাটন, সমান ফাঁক: ট্রি ভিউ, রোটেট, +, সেটিংস, হাইড/আনহাইড
+            // নিচের মাঝখানে ৫টি বাটন, সমান ফাঁক: ট্রি ভিউ, হাইড/আনহাইড, +, রোটেট, সেটিংস
             AnimatedVisibility(
                 visible = buttonsVisible,
                 enter = fadeIn(),
@@ -555,25 +555,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         showTick++
                         settings.updateLayout(nextLayout(settings.layout))
                     }) { LayoutIcon(settings.layout) }
-                    // ২. স্ক্রিন ঘোরানো
-                    SmallFloatingActionButton(onClick = {
-                        showTick++
-                        val landscape = context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-                        activity?.requestedOrientation =
-                            if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                            else ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                    }) { Icon(Icons.Default.ScreenRotation, contentDescription = "স্ক্রিন ঘোরান") }
-                    // ৩. নতুন সদস্য (মাঝখানে)
-                    FloatingActionButton(onClick = {
-                        showTick++
-                        dialog = DialogState(null, defaultParents.first, defaultParents.second)
-                    }) { Icon(Icons.Default.Add, contentDescription = "সদস্য যোগ করুন") }
-                    // ৪. সেটিংস
-                    SmallFloatingActionButton(onClick = {
-                        showTick++
-                        settingsOpen = true
-                    }) { Icon(Icons.Default.Settings, contentDescription = "সেটিংস") }
-                    // ৫. হাইড/আনহাইড
+                    // ২. হাইড/আনহাইড
                     SmallFloatingActionButton(onClick = {
                         showTick++
                         settings.toggleHideActive()
@@ -583,6 +565,24 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                             contentDescription = if (settings.hideActive) "আনহাইড" else "হাইড"
                         )
                     }
+                    // ৩. নতুন সদস্য (মাঝখানে)
+                    FloatingActionButton(onClick = {
+                        showTick++
+                        dialog = DialogState(null, defaultParents.first, defaultParents.second)
+                    }) { Icon(Icons.Default.Add, contentDescription = "সদস্য যোগ করুন") }
+                    // ৪. স্ক্রিন ঘোরানো
+                    SmallFloatingActionButton(onClick = {
+                        showTick++
+                        val landscape = context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+                        activity?.requestedOrientation =
+                            if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                            else ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                    }) { Icon(Icons.Default.ScreenRotation, contentDescription = "স্ক্রিন ঘোরান") }
+                    // ৫. সেটিংস (একেবারে ডানে)
+                    SmallFloatingActionButton(onClick = {
+                        showTick++
+                        settingsOpen = true
+                    }) { Icon(Icons.Default.Settings, contentDescription = "সেটিংস") }
                 }
             }
         }
@@ -591,7 +591,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     if (settingsOpen) {
         SettingsDialog(
             settings = settings,
-            onShowHide = { showHideOpen = true },
+            onShowHide = { settingsOpen = false; showHideOpen = true },
             onBackup = {
                 viewModel.backupToFolder { path ->
                     backupTick++
