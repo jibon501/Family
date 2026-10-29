@@ -68,7 +68,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
@@ -177,20 +179,6 @@ private fun assignColors(roots: List<Person>, all: List<Person>): Map<Long, Colo
         }
     }
     return map
-}
-
-/** যাদের নিচে সন্তান আছে (শো/হাইড তালিকার জন্য), গভীরতাসহ */
-private fun branchRows(all: List<Person>): List<Pair<Person, Int>> {
-    val out = ArrayList<Pair<Person, Int>>()
-    fun walk(p: Person, level: Int, path: Set<Long>) {
-        val sp = spousesOf(p, all)
-        val kids = childrenOf(p, sp, all, path)
-        if (kids.isNotEmpty()) out.add(p to level)
-        val np = path + p.id + sp.map { it.id }
-        kids.forEach { walk(it, level + 1, np) }
-    }
-    findRoots(all).forEach { walk(it, 0, emptySet()) }
-    return out
 }
 
 /** কার সন্তান হবে: (বাবা, মা) */
@@ -379,6 +367,7 @@ private fun enterActions(onSingle: () -> Unit = {}, onDouble: () -> Unit): Keybo
     })
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     val persons by viewModel.persons.collectAsStateWithLifecycle()
@@ -396,6 +385,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     var defaultParents by remember { mutableStateOf<Pair<Long?, Long?>>(null to null) }
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
+    val haptic = LocalHapticFeedback.current
     val version = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
             .getOrNull().orEmpty()
@@ -430,19 +420,6 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
         if (animDone) lineT.snapTo(seq.total.toFloat())
     }
 
-    // নিচের বাটনগুলো ৫ সেকেন্ড পরে লুকায়, ডিসপ্লেতে ট্যাপ করলে ফেরে
-    var buttonsVisible by remember { mutableStateOf(true) }
-    var showTick by remember { mutableIntStateOf(0) }
-    val anyDialog = dialog != null || settingsOpen || showHideOpen || restoreListOpen || aboutOpen ||
-        pendingUri != null || pendingFile != null || actionFile != null || deleteFile != null
-    LaunchedEffect(showTick, anyDialog) {
-        buttonsVisible = true
-        if (!anyDialog) {
-            delay(5000)
-            buttonsVisible = false
-        }
-    }
-
     val restoreLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> if (uri != null) pendingUri = uri }
@@ -462,75 +439,74 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     }
 
     Scaffold { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            if (persons.isEmpty()) {
-                Box(
-                    Modifier.fillMaxSize().padding(24.dp)
-                        .pointerInput(Unit) { detectTapGestures { showTick++ } },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        "এখনো কোনো সদস্য নেই।\nনিচের + বোতামে চাপ দিয়ে প্রথম ব্যক্তিকে যোগ করুন।",
-                        textAlign = TextAlign.Center
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            // ট্রি স্ক্রিন: নিচের বাটন-বক্সের উপর থেকে শুরু
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (persons.isEmpty()) {
+                    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            "এখনো কোনো সদস্য নেই।\nনিচের + বোতামে চাপ দিয়ে প্রথম ব্যক্তিকে যোগ করুন।",
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    val onEdit: (Person, Person?) -> Unit = { p, sp ->
+                        defaultParents = parentsOf(p, sp)
+                        dialog = DialogState(p)
+                    }
+                    val ctx = TreeCtx(
+                        all = persons,
+                        colors = colors,
+                        opts = treeOpts,
+                        anim = LineAnim(lineT.asState()),
+                        layout = settings.layout,
+                        base = seq.base,
+                        onEdit = onEdit,
+                        onReorder = { viewModel.reorder(it) }
                     )
-                }
-            } else {
-                val onEdit: (Person, Person?) -> Unit = { p, sp ->
-                    defaultParents = parentsOf(p, sp)
-                    dialog = DialogState(p)
-                }
-                val ctx = TreeCtx(
-                    all = persons,
-                    colors = colors,
-                    opts = treeOpts,
-                    anim = LineAnim(lineT.asState()),
-                    layout = settings.layout,
-                    base = seq.base,
-                    onEdit = onEdit,
-                    onReorder = { viewModel.reorder(it) }
-                )
-                // ফাঁকা জায়গায় একবার চাপলে: বাটন ফেরে এবং লাইন অ্যানিমেশন আবার চলে
-                val onEmptyTap: () -> Unit = { replay++; showTick++ }
-                // সব ধরনেই জুম ইন-আউট, ডাবল ট্যাপে ২x জুম, টেনে সরানো
-                when (settings.layout) {
-                    "list" -> {
-                        ZoomPanBox(Modifier.fillMaxSize(), fitWidthOnly = true, onTap = onEmptyTap) {
-                            Column(
-                                Modifier.padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 96.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                roots.forEach { root ->
-                                    ListNode(root, ctx, emptySet(), true, true, -1, -1)
-                                }
-                            }
-                        }
-                    }
-                    "left" -> {
-                        ZoomPanBox(Modifier.fillMaxSize(), onTap = onEmptyTap) {
-                            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                                roots.forEach { root ->
-                                    HTreeNode(root, ctx, emptySet(), Pos.NONE, -1, -1)
-                                }
-                            }
-                        }
-                    }
-                    "tree" -> {
-                        ZoomPanBox(Modifier.fillMaxSize(), alignBottom = true, onTap = onEmptyTap) {
-                            Row(Modifier.padding(24.dp), verticalAlignment = Alignment.Bottom) {
-                                roots.forEach { root ->
-                                    Box(Modifier.padding(horizontal = if (roots.size > 1) 16.dp else 0.dp)) {
-                                        GTreeNode(root, ctx, emptySet(), 0)
+                    // ফাঁকা জায়গায় একবার চাপলে লাইন অ্যানিমেশন আবার চলে
+                    val onEmptyTap: () -> Unit = { replay++ }
+                    // সব ধরনেই জুম ইন-আউট, ডাবল ট্যাপে ২x জুম, টেনে সরানো
+                    when (settings.layout) {
+                        "list" -> {
+                            ZoomPanBox(Modifier.fillMaxSize(), fitWidthOnly = true, onTap = onEmptyTap) {
+                                Column(
+                                    Modifier.padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 24.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    roots.forEach { root ->
+                                        ListNode(root, ctx, emptySet(), true, true, -1, -1)
                                     }
                                 }
                             }
                         }
-                    }
-                    else -> {
-                        ZoomPanBox(Modifier.fillMaxSize(), onTap = onEmptyTap) {
-                            Row(Modifier.padding(24.dp), verticalAlignment = Alignment.Top) {
-                                roots.forEach { root ->
-                                    Box(Modifier.padding(horizontal = if (roots.size > 1) 16.dp else 0.dp)) {
-                                        TreeNode(root, ctx, emptySet(), Pos.NONE, -1, -1)
+                        "left" -> {
+                            ZoomPanBox(Modifier.fillMaxSize(), onTap = onEmptyTap) {
+                                Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                                    roots.forEach { root ->
+                                        HTreeNode(root, ctx, emptySet(), Pos.NONE, -1, -1)
+                                    }
+                                }
+                            }
+                        }
+                        "tree" -> {
+                            ZoomPanBox(Modifier.fillMaxSize(), alignBottom = true, onTap = onEmptyTap) {
+                                Row(Modifier.padding(24.dp), verticalAlignment = Alignment.Bottom) {
+                                    roots.forEach { root ->
+                                        Box(Modifier.padding(horizontal = if (roots.size > 1) 16.dp else 0.dp)) {
+                                            GTreeNode(root, ctx, emptySet(), 0)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else -> {
+                            ZoomPanBox(Modifier.fillMaxSize(), onTap = onEmptyTap) {
+                                Row(Modifier.padding(24.dp), verticalAlignment = Alignment.Top) {
+                                    roots.forEach { root ->
+                                        Box(Modifier.padding(horizontal = if (roots.size > 1) 16.dp else 0.dp)) {
+                                            TreeNode(root, ctx, emptySet(), Pos.NONE, -1, -1)
+                                        }
                                     }
                                 }
                             }
@@ -539,50 +515,59 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                 }
             }
 
-            // নিচের মাঝখানে ৫টি বাটন, সমান ফাঁক: ট্রি ভিউ, হাইড/আনহাইড, +, রোটেট, সেটিংস
-            AnimatedVisibility(
-                visible = buttonsVisible,
-                enter = fadeIn(),
-                exit = fadeOut(),
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
+            // নিচের বক্স: ৫টি বাটন সবসময় দেখা যায়, সমান ফাঁক:
+            // ট্রি ভিউ, হাইড/আনহাইড (চেপে ধরলে শো/হাইড), +, রোটেট, সেটিংস
+            Surface(
+                tonalElevation = 3.dp,
+                shadowElevation = 6.dp,
+                shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // ১. ট্রির ধরন বদলানো (চাপলে ১ → ২ → ৩ → ৪ → ১)
                     SmallFloatingActionButton(onClick = {
-                        showTick++
                         settings.updateLayout(nextLayout(settings.layout))
                     }) { LayoutIcon(settings.layout) }
-                    // ২. হাইড/আনহাইড
-                    SmallFloatingActionButton(onClick = {
-                        showTick++
-                        settings.toggleHideActive()
-                    }) {
+                    // ২. হাইড/আনহাইড: চাপলে চালু-বন্ধ, চেপে ধরলে শো/হাইড তালিকা
+                    Box(
+                        Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .combinedClickable(
+                                onClick = { settings.toggleHideActive() },
+                                onLongClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    showHideOpen = true
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(
                             if (settings.hideActive) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = if (settings.hideActive) "আনহাইড" else "হাইড"
+                            contentDescription = if (settings.hideActive) "আনহাইড" else "হাইড",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
                     // ৩. নতুন সদস্য (মাঝখানে)
                     FloatingActionButton(onClick = {
-                        showTick++
                         dialog = DialogState(null, defaultParents.first, defaultParents.second)
                     }) { Icon(Icons.Default.Add, contentDescription = "সদস্য যোগ করুন") }
                     // ৪. স্ক্রিন ঘোরানো
                     SmallFloatingActionButton(onClick = {
-                        showTick++
                         val landscape = context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
                         activity?.requestedOrientation =
                             if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
                             else ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                     }) { Icon(Icons.Default.ScreenRotation, contentDescription = "স্ক্রিন ঘোরান") }
                     // ৫. সেটিংস (একেবারে ডানে)
-                    SmallFloatingActionButton(onClick = {
-                        showTick++
-                        settingsOpen = true
-                    }) { Icon(Icons.Default.Settings, contentDescription = "সেটিংস") }
+                    SmallFloatingActionButton(onClick = { settingsOpen = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "সেটিংস")
+                    }
                 }
             }
         }
@@ -591,7 +576,6 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     if (settingsOpen) {
         SettingsDialog(
             settings = settings,
-            onShowHide = { settingsOpen = false; showHideOpen = true },
             onBackup = {
                 viewModel.backupToFolder { path ->
                     backupTick++
@@ -744,7 +728,6 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
 @Composable
 private fun SettingsDialog(
     settings: AppSettings,
-    onShowHide: () -> Unit,
     onBackup: () -> Unit,
     onRestore: () -> Unit,
     onAbout: () -> Unit,
@@ -764,7 +747,6 @@ private fun SettingsDialog(
                 SwitchRow("স্ত্রীর নাম দেখান", settings.showWives) { settings.updateShowWives(it) }
 
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                OutlinedButton(onClick = onShowHide, modifier = Modifier.fillMaxWidth()) { Text("শো/হাইড") }
                 OutlinedButton(onClick = onBackup, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ নিন") }
                 OutlinedButton(onClick = onRestore, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ রিস্টোর করুন") }
                 OutlinedButton(onClick = onAbout, modifier = Modifier.fillMaxWidth()) { Text("About") }
@@ -774,13 +756,76 @@ private fun SettingsDialog(
     )
 }
 
+/** শো/হাইড তালিকার একটি নাম ও তার নিচের (যাদের নিজেদেরও সন্তান আছে) নামগুলো */
+private class HideNode(val p: Person, val kids: List<HideNode>)
+
+/** যাদের নিচে ট্রি (সন্তান) আছে শুধু তাদের নিয়ে গাছ */
+private fun branchTree(all: List<Person>): List<HideNode> {
+    fun build(p: Person, path: Set<Long>): HideNode? {
+        val sp = spousesOf(p, all)
+        val kids = childrenOf(p, sp, all, path)
+        if (kids.isEmpty()) return null
+        val np = path + p.id + sp.map { it.id }
+        return HideNode(p, kids.mapNotNull { build(it, np) })
+    }
+    return findRoots(all).mapNotNull { build(it, emptySet()) }
+}
+
+/** একটি সারি: নাম + সুইচ, কানেকশন লাইনসহ; লুকানো নামের নিচের সারিগুলো দেখানো হয় না */
+@Composable
+private fun HideNodeRow(
+    node: HideNode,
+    settings: AppSettings,
+    isRoot: Boolean,
+    isLast: Boolean,
+    lineColor: Color
+) {
+    var rowH by remember { mutableIntStateOf(0) }
+    val hidden = node.p.id in settings.hidden
+    Column(
+        Modifier
+            .drawBehind {
+                if (!isRoot) {
+                    val sw = 2.dp.toPx()
+                    val x = 8.dp.toPx()
+                    val cy = rowH / 2f
+                    drawLine(lineColor, Offset(x, 0f), Offset(x, if (isLast) cy else size.height), sw)
+                    drawLine(lineColor, Offset(x, cy), Offset(22.dp.toPx(), cy), sw)
+                }
+            }
+            .padding(start = if (isRoot) 0.dp else 22.dp)
+    ) {
+        // সারিগুলোর মাঝে কোনো ফাঁক নেই
+        Row(
+            Modifier.fillMaxWidth().onSizeChanged { rowH = it.height },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                node.p.name,
+                modifier = Modifier.weight(1f),
+                color = if (hidden) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
+            )
+            Switch(
+                checked = !hidden,
+                onCheckedChange = { settings.toggleHidden(node.p.id) }
+            )
+        }
+        if (!hidden) {
+            node.kids.forEachIndexed { i, k ->
+                HideNodeRow(k, settings, false, i == node.kids.lastIndex, lineColor)
+            }
+        }
+    }
+}
+
 /**
- * যাদের নিচে ট্রি আছে তাদের নাম; বন্ধ করলে সেই নাম ও তার নিচের সবাই লুকায়।
+ * শো/হাইড: যাদের নিচে ট্রি আছে তাদের নাম, কানেকশন লাইনসহ। বন্ধ করলে সেই নাম ও তার নিচের সবাই লুকায়।
  * পেছনে অন্ধকার পর্দা নেই, ট্রি স্ক্রিন পরিষ্কার দেখা যায়, তাই সুইচ বদলালেই ট্রির পরিবর্তন চোখে পড়ে।
  */
 @Composable
 private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: () -> Unit) {
-    val rows = remember(all) { branchRows(all) }
+    val tree = remember(all) { branchTree(all) }
+    val lineColor = MaterialTheme.colorScheme.primary
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -792,33 +837,19 @@ private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: 
                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
                 tonalElevation = 6.dp,
                 shadowElevation = 8.dp,
-                modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
+                modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)
             ) {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("শো/হাইড", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                         TextButton(onClick = onDismiss) { Text("ঠিক আছে") }
                     }
-                    if (rows.isEmpty()) {
+                    if (tree.isEmpty()) {
                         Text("যাদের নিচে ট্রি আছে এমন কোনো নাম এখনো নেই।")
                     } else {
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            Text(
-                                "বন্ধ করলে সেই নাম ও তার নিচের সব নাম লুকাবে।",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            rows.forEach { (p, level) ->
-                                Row(
-                                    Modifier.fillMaxWidth().padding(start = (level * 16).dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(p.name, Modifier.weight(1f))
-                                    Switch(
-                                        checked = p.id !in settings.hidden,
-                                        onCheckedChange = { settings.toggleHidden(p.id) }
-                                    )
-                                }
+                            tree.forEach { root ->
+                                HideNodeRow(root, settings, true, true, lineColor)
                             }
                         }
                     }
