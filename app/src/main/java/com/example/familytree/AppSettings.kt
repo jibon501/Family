@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
 
 /** সেটিংস: থিম, স্ত্রীর নাম দেখানো, ট্রির ধরন, লুকানো নামের তালিকা। SharedPreferences-এ সংরক্ষিত থাকে */
 class AppSettings(context: Context) {
@@ -33,6 +34,36 @@ class AppSettings(context: Context) {
     fun toggleHideActive() {
         hideActive = !hideActive
         prefs.edit().putBoolean("hideActive", hideActive).apply()
+    }
+
+    /** গোল ভিউ: টেনে সরানো নামগুলোর জায়গা (dp এককে, নামের id অনুযায়ী) */
+    var offsets by mutableStateOf(loadOffsets())
+        private set
+
+    private fun loadOffsets(): Map<Long, Offset> =
+        (prefs.getString("offsets", "") ?: "").split(";").mapNotNull { e ->
+            val q = e.split(",")
+            if (q.size != 3) return@mapNotNull null
+            val id = q[0].toLongOrNull()
+            val x = q[1].toFloatOrNull()
+            val y = q[2].toFloatOrNull()
+            if (id != null && x != null && y != null) id to Offset(x, y) else null
+        }.toMap()
+
+    fun setOffset(id: Long, o: Offset) {
+        offsets = offsets + (id to o)
+        saveOffsets()
+    }
+
+    fun resetOffsets() {
+        offsets = emptyMap()
+        saveOffsets()
+    }
+
+    private fun saveOffsets() {
+        prefs.edit()
+            .putString("offsets", offsets.entries.joinToString(";") { "${it.key},${it.value.x},${it.value.y}" })
+            .apply()
     }
 
     fun updateTheme(v: String) { theme = v; prefs.edit().putString("theme", v).apply() }
