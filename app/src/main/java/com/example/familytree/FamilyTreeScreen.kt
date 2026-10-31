@@ -396,6 +396,7 @@ private class TreeCtx(
     val onOffset: (Long, Offset) -> Unit,
     val onEdit: (Person, Person?) -> Unit,
     val onToggle: (Person) -> Unit,
+    val rootIds: Set<Long>,
     val onReorder: (List<Long>) -> Unit
 ) {
     val hasStem: Boolean get() = layout == "top" || layout == "left"
@@ -551,34 +552,31 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
 
     // লাইন অ্যানিমেশন: অ্যাপ খুললে, ট্রির ধরন বদলালে, বা ডিসপ্লেতে ট্যাপ করলে নতুন করে শুরু।
     // একটা লাইন শেষ হলে পরেরটা শুরু হয়, মোট সময় নির্দিষ্ট নয়।
-    var replay by remember { mutableIntStateOf(0) }
     var animDone by remember { mutableStateOf(false) }
     val lineT = remember { Animatable(0f) }
     val totalNow by rememberUpdatedState(seq.total)
-    // ট্রির ধরন বদলালে প্রতিটি ধরনের অ্যানিমেশন শুধু প্রথমবার; পরে বদলালে সাথে সাথে পুরো ট্রি দেখায়।
-    // ফাঁকা জায়গায় ট্যাপ করলে (replay) সবসময় আবার চলে।
-    val animatedLayouts = remember { mutableSetOf<String>() }
-    var lastReplay by remember { mutableIntStateOf(0) }
-    LaunchedEffect(settings.layout, replay, persons.isNotEmpty()) {
-        val forced = replay != lastReplay
-        lastReplay = replay
-        if (!forced && settings.layout in animatedLayouts) {
-            lineT.snapTo(totalNow)
+    // অ্যানিমেশন শুধু ট্রির ধরন বদলালে, প্রতিটি ধরনের জন্য প্রথমবার। অ্যাপ খোলার সময়কার ধরনে ও
+    // আগে দেখা ধরনে ফিরলে কোনো অ্যানিমেশন নেই; ফাঁকা জায়গায় ট্যাপেও আর চলে না।
+    val animatedLayouts = remember { mutableSetOf(settings.layout) }
+    LaunchedEffect(settings.layout, persons.isNotEmpty()) {
+        if (settings.layout in animatedLayouts || persons.isEmpty()) {
+            lineT.snapTo(totalNow + 1f)
             animDone = true
             return@LaunchedEffect
         }
-        if (persons.isNotEmpty()) animatedLayouts.add(settings.layout)
+        animatedLayouts.add(settings.layout)
         animDone = false
         lineT.snapTo(0f)
         // কম সদস্য দেখালে ধীরে, বেশি সদস্য দেখালে দ্রুত
         val ms = (totalNow * msPerUnit(totalNow)).toInt().coerceAtLeast(1)
-        lineT.animateTo(totalNow, tween(ms, easing = LinearEasing))
-        lineT.snapTo(totalNow)
+        // শেষ নামগুলোও পুরো ফুটে ওঠার জন্য একটু বাড়তি সময়
+        lineT.animateTo(totalNow + 0.6f, tween(ms, easing = LinearEasing))
+        lineT.snapTo(totalNow + 1f)
         animDone = true
     }
     // অ্যানিমেশন শেষের পর সদস্য যোগ/হাইড-আনহাইডে নতুন লাইন সাথে সাথে দেখাবে
     LaunchedEffect(seq.total, animDone) {
-        if (animDone) lineT.snapTo(seq.total)
+        if (animDone) lineT.snapTo(seq.total + 1f)
     }
 
     val restoreLauncher = rememberLauncherForActivityResult(
@@ -626,6 +624,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         offsets = settings.offsets,
                         onOffset = { id, o -> settings.setOffset(id, o) },
                         onEdit = onEdit,
+                        rootIds = allRoots.map { it.id }.toSet(),
                         onToggle = { p ->
                             // নামটা দেখা যায়, শুধু তার সরাসরি সন্তানরা (ও তাদের নিচের সবাই) লুকায় / আবার দেখা দেয়
                             val kids = childrenOf(p, spousesOf(p, persons), persons, emptySet())
@@ -633,8 +632,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         },
                         onReorder = { viewModel.reorder(it) }
                     )
-                    // ফাঁকা জায়গায় একবার চাপলে লাইন অ্যানিমেশন আবার চলে
-                    val onEmptyTap: () -> Unit = { replay++ }
+                    val onEmptyTap: () -> Unit = {}
                     // সব ধরনেই জুম ইন-আউট, ডাবল ট্যাপে ২x জুম, টেনে সরানো
                     when (settings.layout) {
                         "list" -> {
@@ -781,6 +779,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
             },
             onRestore = { restoreListOpen = true },
             onAbout = { aboutOpen = true },
+            version = version,
             onDismiss = { settingsOpen = false }
         )
     }
@@ -917,6 +916,7 @@ private fun SettingsDialog(
     onBackup: () -> Unit,
     onRestore: () -> Unit,
     onAbout: () -> Unit,
+    version: String,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -933,6 +933,13 @@ private fun SettingsDialog(
                 OutlinedButton(onClick = onBackup, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ নিন") }
                 OutlinedButton(onClick = onRestore, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ রিস্টোর করুন") }
                 OutlinedButton(onClick = onAbout, modifier = Modifier.fillMaxWidth()) { Text("About") }
+                Text(
+                    "version $version",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                )
             }
         },
         confirmButton = {}
@@ -1215,6 +1222,7 @@ private fun TreeNode(
         NameButton(
             person.name, color, dragHandler, shownSpouses.map { it.name }, ctx.alphaOf(person.id),
             collapsedKids = collapsedKidsOf(person, ctx),
+            main = person.id in ctx.rootIds,
             onLongClick = { ctx.onEdit(person, firstSpouse) }
         ) { ctx.onToggle(person) }
 
@@ -1306,6 +1314,7 @@ private fun HTreeNode(person: Person, ctx: TreeCtx, path: Set<Long>, isRoot: Boo
             NameButton(
                 person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id),
                 collapsedKids = collapsedKidsOf(person, ctx),
+                main = person.id in ctx.rootIds,
                 onLongClick = { ctx.onEdit(person, spouses.firstOrNull()) }
             ) { ctx.onToggle(person) }
         }
@@ -1380,6 +1389,7 @@ private fun ListNode(
             NameButton(
                 person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id),
                 collapsedKids = collapsedKidsOf(person, ctx),
+                main = person.id in ctx.rootIds,
                 onLongClick = { ctx.onEdit(person, spouses.firstOrNull()) }
             ) { ctx.onToggle(person) }
         }
@@ -1545,6 +1555,7 @@ private fun RoundTree(root: Person, ctx: TreeCtx, spiral: Boolean = false) {
                         spouseNames = shown.map { it.name },
                         alphaOf = ctx.alphaOf(id),
                         collapsedKids = collapsedKidsOf(n.rt.p, ctx),
+                        main = n.rt.p.id in ctx.rootIds,
                         onLongClick = { ctx.onEdit(n.rt.p, sp.firstOrNull()) }
                     ) { ctx.onToggle(n.rt.p) }
                 }
@@ -1571,6 +1582,7 @@ private fun NameButton(
     spouseNames: List<String> = emptyList(),
     alphaOf: () -> Float = { 1f },
     collapsedKids: Int = 0,
+    main: Boolean = false,
     onLongClick: () -> Unit = {},
     onClick: () -> Unit
 ) {
@@ -1582,6 +1594,8 @@ private fun NameButton(
             .graphicsLayer { this.alpha = alphaOf() }
             .clip(RoundedCornerShape(10.dp))
             .background(color)
+            // প্রধান নাম: একটা সরল সাদা বর্ডার
+            .then(if (main) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -1621,12 +1635,15 @@ private fun NameButton(
                     }
                 }
             }
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = if (main) 18.dp else 14.dp, vertical = if (main) 11.dp else 8.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(name, color = Color.White, fontWeight = FontWeight.Medium)
+                Text(
+                    name, color = Color.White, fontWeight = FontWeight.Medium,
+                    fontSize = if (main) 19.sp else 16.sp
+                )
                 // গুটানো থাকলে নিচে কতজন লুকিয়ে আছে
                 if (collapsedKids > 0) {
                     Text("  +${bn(collapsedKids)}", color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp)
@@ -1952,10 +1969,18 @@ private fun PersonDialog(
 private fun AboutScreen(version: String, onDismiss: () -> Unit) {
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
+        // সত্যিকারের ফুলস্ক্রীন: উইন্ডো পুরো স্ক্রিন জোড়ে, স্টেটাস/নেভিগেশন বারের পেছন পর্যন্ত
+        val view = LocalView.current
+        SideEffect {
+            (view.parent as? DialogWindowProvider)?.window?.setLayout(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
         val pageBg = Color(0xFF071226)
-        Column(Modifier.fillMaxSize().background(pageBg)) {
+        Column(Modifier.fillMaxSize().background(pageBg).statusBarsPadding()) {
             AndroidView(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 factory = { ctx ->
