@@ -995,7 +995,13 @@ private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: 
                     .pointerInput(Unit) { detectTapGestures { } }
             ) {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    Text("শো/হাইড", style = MaterialTheme.typography.titleLarge)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("শো/হাইড", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                        // এক টিপে সব সুইচ অন (সবাইকে দেখাও)
+                        if (rows.isNotEmpty()) {
+                            TextButton(onClick = { settings.clearHidden() }) { Text("শো অল") }
+                        }
+                    }
                     Text(
                         "সুইচ বদলালেই কার্যকর হবে। বাইরে ট্যাপ করলে বন্ধ হবে।",
                         style = MaterialTheme.typography.bodySmall,
