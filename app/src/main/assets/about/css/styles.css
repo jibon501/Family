@@ -1,1 +1,61 @@
-
+/* Business card for Zahangir Alam */
+:root{
+  --bg:#0f1724;
+  --card:#0b1220;
+  --muted:#9aa4b2;
+  --accent:#4fd1c5;
+}
+*{box-sizing:border-box}
+body{
+  background: linear-gradient(180deg,#081026 0%, #071226 100%);
+  color:#e6eef6;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  min-height:100vh;
+  margin:0;
+  padding:20px;
+}
+.card{
+  width:100%;
+  max-width:420px;
+  background:var(--card);
+  border-radius:16px;
+  padding:28px;
+  box-shadow: 0 10px 30px rgba(2,6,23,0.6);
+  text-align:center;
+}
+.avatar{
+  width:96px;
+  height:96px;
+  border-radius:50%;
+  display:block;
+  margin:0 auto 14px;
+  background:#102233;
+  object-fit:cover;
+}
+h1{margin:0;font-size:1.6rem;letter-spacing:0.2px}
+.role{color:var(--muted);margin:6px 0 16px}
+.contact a, .social a{
+  display:inline-block;
+  margin:6px 8px;
+  color:var(--accent);
+  text-decoration:none;
+  font-weight:600;
+}
+.summary{
+  color:var(--muted);
+  margin:18px 0;
+  line-height:1.45;
+  font-size:0.95rem;
+}
+.actions{display:flex;gap:10px;justify-content:center;margin-top:6px}
+.btn{
+  padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:600;background:linear-gradient(90deg,var(--accent),#38b2ac);color:#062022;
+}
+.btn.ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--accent)}
+.foot{font-size:0.8rem;color:var(--muted);text-align:center;margin-top:16px}
+@media (max-width:420px){
+  .card{padding:20px;border-radius:12px}
+}
