@@ -14,7 +14,8 @@ class AppSettings(context: Context) {
     var theme by mutableStateOf(prefs.getString("theme", "system") ?: "system")
         private set
 
-    var showWives by mutableStateOf(prefs.getBoolean("showWives", true))
+    /** স্ত্রীর নাম সবসময় স্বামীর ঘরে দেখানো হয় (সেটিংসে আর বন্ধ করার সুইচ নেই) */
+    var showWives by mutableStateOf(true)
         private set
 
     /** "top" = উপর থেকে নিচে, "left" = বাম থেকে ডানে, "list" = তালিকা */
@@ -76,6 +77,21 @@ class AppSettings(context: Context) {
         saveHidden()
         // কোনো নাম লুকাতে চাইলে হাইড চালু না থাকলে চালু করে দেওয়া, যাতে পরিবর্তন সাথে সাথে চোখে পড়ে
         if (hiding && !hideActive) {
+            hideActive = true
+            prefs.edit().putBoolean("hideActive", true).apply()
+        }
+    }
+
+    /**
+     * নামে চাপ: এই নামের সরাসরি সন্তানরা সবাই লুকানো থাকলে সবাইকে দেখায়, নইলে সবাইকে লুকায়
+     * (তাদের নিচের সবাইও সাথে লুকায়)। নামটা নিজে সবসময় দেখা যায়।
+     */
+    fun toggleChildrenHidden(ids: List<Long>) {
+        if (ids.isEmpty()) return
+        val allHidden = hideActive && ids.all { it in hidden }
+        hidden = if (allHidden) hidden - ids.toSet() else hidden + ids
+        saveHidden()
+        if (!allHidden && !hideActive) {
             hideActive = true
             prefs.edit().putBoolean("hideActive", true).apply()
         }

@@ -117,12 +117,11 @@ private data class DialogState(
 private enum class Pos { NONE, ONLY, FIRST, MIDDLE, LAST }
 
 /** সেটিংস অনুযায়ী ট্রিতে কী দেখানো হবে: স্ত্রীর নাম, আর যাদের লুকানো হয়েছে */
-private data class TreeOpts(val showWives: Boolean, val hidden: Set<Long>, val collapsed: Set<Long> = emptySet())
+private data class TreeOpts(val showWives: Boolean, val hidden: Set<Long>)
 
-/** দেখানো সন্তান: যাকে লুকানো হয়েছে তাকে বাদ; নাম চেপে গুটিয়ে রাখলে তার নিচে কেউ নেই */
+/** দেখানো সন্তান: যাদের লুকানো হয়েছে তারা (ও তাদের নিচের সবাই) বাদ */
 private fun visibleKids(p: Person, sp: List<Person>, all: List<Person>, path: Set<Long>, opts: TreeOpts): List<Person> =
-    if (p.id in opts.collapsed) emptyList()
-    else childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }
+    childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }
 
 /**
  * ডায়ালগের বাবা/মা/স্ত্রীর ঘর: id থাকলে তালিকা থেকে বাছা, না থাকলে লেখা নাম।
@@ -545,10 +544,8 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     // হাইড চালু থাকলে শো/হাইড তালিকার লুকানো নামগুলো বাদ, আনহাইড করলে সব দেখায়
     val hiddenNow = if (settings.hideActive) settings.hidden else emptySet()
     val roots = allRoots.filter { it.id !in hiddenNow }
-    // নামে চাপ দিলে তার নিচের সবাই গুটিয়ে যায় / আবার দেখা দেয়
-    var collapsed by remember { mutableStateOf(setOf<Long>()) }
-    val treeOpts = TreeOpts(settings.showWives, hiddenNow, collapsed)
-    val seq = remember(persons, hiddenNow, collapsed, settings.showWives, settings.layout) {
+    val treeOpts = TreeOpts(settings.showWives, hiddenNow)
+    val seq = remember(persons, hiddenNow, settings.showWives, settings.layout) {
         buildSeq(roots, persons, treeOpts, settings.layout)
     }
 
@@ -558,7 +555,19 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     var animDone by remember { mutableStateOf(false) }
     val lineT = remember { Animatable(0f) }
     val totalNow by rememberUpdatedState(seq.total)
+    // ট্রির ধরন বদলালে প্রতিটি ধরনের অ্যানিমেশন শুধু প্রথমবার; পরে বদলালে সাথে সাথে পুরো ট্রি দেখায়।
+    // ফাঁকা জায়গায় ট্যাপ করলে (replay) সবসময় আবার চলে।
+    val animatedLayouts = remember { mutableSetOf<String>() }
+    var lastReplay by remember { mutableIntStateOf(0) }
     LaunchedEffect(settings.layout, replay, persons.isNotEmpty()) {
+        val forced = replay != lastReplay
+        lastReplay = replay
+        if (!forced && settings.layout in animatedLayouts) {
+            lineT.snapTo(totalNow)
+            animDone = true
+            return@LaunchedEffect
+        }
+        if (persons.isNotEmpty()) animatedLayouts.add(settings.layout)
         animDone = false
         lineT.snapTo(0f)
         // কম সদস্য দেখালে ধীরে, বেশি সদস্য দেখালে দ্রুত
@@ -618,9 +627,9 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         onOffset = { id, o -> settings.setOffset(id, o) },
                         onEdit = onEdit,
                         onToggle = { p ->
-                            val has = childrenOf(p, spousesOf(p, persons), persons, emptySet()).isNotEmpty()
-                            if (p.id in collapsed) collapsed = collapsed - p.id
-                            else if (has) collapsed = collapsed + p.id
+                            // নামটা দেখা যায়, শুধু তার সরাসরি সন্তানরা (ও তাদের নিচের সবাই) লুকায় / আবার দেখা দেয়
+                            val kids = childrenOf(p, spousesOf(p, persons), persons, emptySet())
+                            settings.toggleChildrenHidden(kids.map { it.id })
                         },
                         onReorder = { viewModel.reorder(it) }
                     )
@@ -671,7 +680,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         }
                     }
                     // প্রতি প্রজন্মের প্রথম নাম ও মোট কতজন, নিচের ডান কোণে হালকা করে (ট্যাচ আটকায় না)
-                    val stats = remember(persons, hiddenNow, collapsed) { generationCounts(roots, persons, treeOpts) }
+                    val stats = remember(persons, hiddenNow) { generationCounts(roots, persons, treeOpts) }
                     val gens = stats.gens
                     if (gens.isNotEmpty()) {
                         Column(
@@ -921,9 +930,6 @@ private fun SettingsDialog(
                 ChoiceRow("রাত (নাইট)", settings.theme == "night") { settings.updateTheme("night") }
 
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                SwitchRow("স্ত্রীর নাম দেখান", settings.showWives) { settings.updateShowWives(it) }
-
-                HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 OutlinedButton(onClick = onBackup, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ নিন") }
                 OutlinedButton(onClick = onRestore, modifier = Modifier.fillMaxWidth()) { Text("ব্যাকআপ রিস্টোর করুন") }
                 OutlinedButton(onClick = onAbout, modifier = Modifier.fillMaxWidth()) { Text("About") }
@@ -933,78 +939,31 @@ private fun SettingsDialog(
     )
 }
 
-/** শো/হাইড তালিকার একটি নাম ও তার নিচের (যাদের নিজেদেরও সন্তান আছে) নামগুলো */
-private class HideNode(val p: Person, val kids: List<HideNode>)
-
-/** যাদের নিচে ট্রি (সন্তান) আছে শুধু তাদের নিয়ে গাছ */
-private fun branchTree(all: List<Person>): List<HideNode> {
-    fun build(p: Person, path: Set<Long>): HideNode? {
+/** ট্রির ক্রমে (বাবা আগে, তারপর সন্তানরা) সবার তালিকা */
+private fun treeOrder(all: List<Person>): List<Person> {
+    val out = ArrayList<Person>()
+    val seen = HashSet<Long>()
+    fun visit(p: Person, path: Set<Long>) {
+        if (!seen.add(p.id)) return
+        out.add(p)
         val sp = spousesOf(p, all)
-        val kids = childrenOf(p, sp, all, path)
-        if (kids.isEmpty()) return null
         val np = path + p.id + sp.map { it.id }
-        return HideNode(p, kids.mapNotNull { build(it, np) })
+        childrenOf(p, sp, all, path).forEach { visit(it, np) }
     }
-    return findRoots(all).mapNotNull { build(it, emptySet()) }
-}
-
-/** একটি সারি: নাম + সুইচ, কানেকশন লাইনসহ; লুকানো নামের নিচের সারিগুলো দেখানো হয় না */
-@Composable
-private fun HideNodeRow(
-    node: HideNode,
-    settings: AppSettings,
-    isRoot: Boolean,
-    isLast: Boolean,
-    lineColor: Color,
-    parentHidden: Boolean = false
-) {
-    var rowH by remember { mutableIntStateOf(0) }
-    val hidden = node.p.id in settings.hidden
-    // নিজে বা উপরের কেউ লুকানো হলে ঝাপসা দেখায়, তবে সুইচ সবসময় থাকে
-    val dim = hidden || parentHidden
-    Column(
-        Modifier
-            .drawBehind {
-                if (!isRoot) {
-                    val sw = 2.dp.toPx()
-                    val x = 8.dp.toPx()
-                    val cy = rowH / 2f
-                    drawLine(lineColor, Offset(x, 0f), Offset(x, if (isLast) cy else size.height), sw)
-                    drawLine(lineColor, Offset(x, cy), Offset(22.dp.toPx(), cy), sw)
-                }
-            }
-            .padding(start = if (isRoot) 0.dp else 22.dp)
-    ) {
-        // সারিগুলোর মাঝে কোনো ফাঁক নেই
-        Row(
-            Modifier.fillMaxWidth().onSizeChanged { rowH = it.height },
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                node.p.name,
-                modifier = Modifier.weight(1f),
-                color = if (dim) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
-            )
-            Switch(
-                checked = !hidden,
-                onCheckedChange = { settings.toggleHidden(node.p.id) }
-            )
-        }
-        node.kids.forEachIndexed { i, k ->
-            HideNodeRow(k, settings, false, i == node.kids.lastIndex, lineColor, dim)
-        }
-    }
+    findRoots(all).forEach { visit(it, emptySet()) }
+    return out
 }
 
 /**
- * শো/হাইড: যাদের নিচে ট্রি আছে তাদের নাম, কানেকশন লাইনসহ। সুইচ অন/অফ করলেই সাথে সাথে ট্রিতে কার্যকর হয়।
- * "ঠিক আছে" বাটন নেই: প্যানেলের বাইরে ফাঁকা জায়গায় ট্যাপ করলে (বা ব্যাক চাপলে) প্যানেল আবার লুকিয়ে যায়।
- * পেছনে অন্ধকার পর্দা নেই, ট্রি স্ক্রিন পরিষ্কার দেখা যায়।
+ * শো/হাইড: শুধু ট্রিতে যাদের লুকানো হয়েছে তাদের নাম, সুইচসহ (সুইচ অন = দেখাও, অফ = লুকাও)।
+ * সুইচ বদলালেই সাথে সাথে ট্রিতে কার্যকর হয়। খোলার সময়ের তালিকা বক্স বন্ধ না হওয়া পর্যন্ত একই থাকে,
+ * তাই দেখানো করা নামও সারিতে থাকে এবং আবার লুকানো যায়।
+ * "ঠিক আছে" বাটন নেই: প্যানেলের বাইরে ফাঁকা জায়গায় ট্যাপ করলে (বা ব্যাক চাপলে) প্যানেল বন্ধ হয়।
  */
 @Composable
 private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: () -> Unit) {
-    val tree = remember(all) { branchTree(all) }
-    val lineColor = MaterialTheme.colorScheme.primary
+    val rows = remember { treeOrder(all).filter { it.id in settings.hidden } }
+    val byId = remember(all) { all.associateBy { it.id } }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -1036,12 +995,34 @@ private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: 
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(bottom = 4.dp)
                     )
-                    if (tree.isEmpty()) {
-                        Text("যাদের নিচে ট্রি আছে এমন কোনো নাম এখনো নেই।")
+                    if (rows.isEmpty()) {
+                        Text("ট্রিতে এখন কোনো নাম লুকানো নেই। যে নামে চাপ দেবেন, তার নিচের সবাই লুকিয়ে এখানে আসবে।")
                     } else {
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            tree.forEach { root ->
-                                HideNodeRow(root, settings, true, true, lineColor)
+                            rows.forEach { p ->
+                                val hidden = p.id in settings.hidden
+                                val parent = (p.fatherId ?: p.motherId)?.let { byId[it] }
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            p.name,
+                                            color = if (hidden) MaterialTheme.colorScheme.outline
+                                            else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        if (parent != null) {
+                                            Text(
+                                                "${parent.name}-এর সন্তান",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.outline,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                    Switch(
+                                        checked = !hidden,
+                                        onCheckedChange = { settings.toggleHidden(p.id) }
+                                    )
+                                }
                             }
                         }
                     }
@@ -1572,15 +1553,13 @@ private fun RoundTree(root: Person, ctx: TreeCtx, spiral: Boolean = false) {
     }
 }
 
-/** গুটিয়ে রাখা নামের নিচে কতজন সরাসরি সন্তান লুকিয়ে আছে (গুটানো না থাকলে ০) */
+/** এই নামের কতজন সরাসরি সন্তান এখন লুকানো (হাইড চালু থাকলে) */
 private fun collapsedKidsOf(p: Person, ctx: TreeCtx): Int =
-    if (p.id in ctx.opts.collapsed)
-        childrenOf(p, spousesOf(p, ctx.all), ctx.all, emptySet()).count { it.id !in ctx.opts.hidden }
-    else 0
+    childrenOf(p, spousesOf(p, ctx.all), ctx.all, emptySet()).count { it.id in ctx.opts.hidden }
 
 /**
  * নামের বাটন:
- *  - একবার চাপ: তার নিচের সব নাম লুকায় / আবার দেখা দেয়
+ *  - একবার চাপ: নামটা থাকে, তার নিচের সব নাম লুকায় / আবার দেখা দেয়
  *  - চেপে ধরে ছাড়লে: সদস্যের তথ্য বক্স (onLongClick)
  *  - চেপে ধরে টানলে (dragHandler থাকলে): সরানো / ক্রম বদল
  */
