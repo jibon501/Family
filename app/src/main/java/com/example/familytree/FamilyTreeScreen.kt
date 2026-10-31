@@ -96,6 +96,9 @@ import java.io.File
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -206,6 +209,7 @@ private fun nextLayout(cur: String) = when (cur) {
     "top" -> "left"
     "left" -> "list"
     "list" -> "round"
+    "round" -> "spiral"
     else -> "top"
 }
 
@@ -282,7 +286,7 @@ private fun LineBox(color: Color, w: Dp, h: Dp, vertical: Boolean, progress: () 
 /** একজনের সন্তানদের লাইন আঁকতে কত ধাপ সময় লাগে */
 private fun connLen(layout: String, n: Int): Float = when (layout) {
     "list" -> 2f * n
-    "round" -> 1f * n
+    "round", "spiral" -> 1f * n
     else -> if (n == 1) 1f else 1.5f + 0.5f * n
 }
 
@@ -293,35 +297,41 @@ private fun connLen(layout: String, n: Int): Float = when (layout) {
 private fun msPerUnit(total: Float): Float =
     (500f / (1f + total / 30f)).coerceIn(20f, 450f)
 
-/** প্রজন্ম ধরে দেখানো সদস্যের সংখ্যা (হাইড করা বাদ; স্ত্রীর নাম চালু থাকলে স্ত্রীসহ) */
-private fun generationCounts(roots: List<Person>, all: List<Person>, opts: TreeOpts): List<Pair<String, Int>> {
+/** প্রজন্ম ধরে (প্রথম জনের নাম, সদস্য সংখ্যা: স্ত্রী বাদে) এবং মোট স্ত্রীর সংখ্যা */
+private class GenStats(val gens: List<Pair<String, Int>>, val wives: Int)
+
+private fun generationCounts(roots: List<Person>, all: List<Person>, opts: TreeOpts): GenStats {
     val counts = ArrayList<Pair<String, Int>>()
+    var wives = 0
     var level: List<Pair<Person, Set<Long>>> = roots.map { it to emptySet<Long>() }
     while (level.isNotEmpty()) {
         var n = 0
         val next = ArrayList<Pair<Person, Set<Long>>>()
         level.forEach { (p, path) ->
             val sp = spousesOf(p, all)
-            n += 1 + (if (opts.showWives) sp.size else 0)
+            n += 1
+            wives += sp.size
             val np = path + p.id + sp.map { it.id }
             childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }.forEach { next.add(it to np) }
         }
         counts.add(level.first().first.name to n)
         level = next
     }
-    return counts
+    return GenStats(counts, wives)
 }
 
 private fun bn(n: Int): String =
     n.toString().map { if (it in '0'..'9') "০১২৩৪৫৬৭৮৯"[it - '0'] else it }.joinToString("")
 
 /** প্রতিটি সদস্যের লাইনগুলো কত ধাপ থেকে শুরু, আর মোট কত ধাপ */
-private class Seq(val base: Map<Long, Float>, val total: Float)
+private class Seq(val base: Map<Long, Float>, val total: Float, val reveal: Map<Long, Float>)
 
 /** প্রজন্ম ধরে, প্রতি প্রজন্মে বাম থেকে ডানে ধাপ বসানো */
 private fun buildSeq(roots: List<Person>, all: List<Person>, opts: TreeOpts, layout: String): Seq {
     val hasStem = layout == "top" || layout == "left"
     val base = HashMap<Long, Float>()
+    // কোন নাম কখন দেখা দেবে: যে লাইন তার কাছে পৌঁছায় সেটা শেষ হলে (মূল নাম শুরু থেকেই দেখা যায়)
+    val reveal = HashMap<Long, Float>()
     var next = 0f
     val queue = ArrayDeque<Pair<Person, Set<Long>>>()
     roots.forEach { queue.add(it to emptySet()) }
@@ -330,12 +340,20 @@ private fun buildSeq(roots: List<Person>, all: List<Person>, opts: TreeOpts, lay
         val sp = spousesOf(p, all)
         val kids = childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }
         base[p.id] = next
+        val connStart = next + (if (hasStem && kids.isNotEmpty()) 1f else 0f)
         next += (if (hasStem && kids.isNotEmpty()) 1f else 0f) +
             (if (kids.isNotEmpty()) connLen(layout, kids.size) else 0f)
         val np = path + p.id + sp.map { it.id }
-        kids.forEach { queue.add(it to np) }
+        kids.forEachIndexed { i, k ->
+            reveal[k.id] = when (layout) {
+                "list" -> connStart + 2f * i + 2f
+                "round", "spiral" -> connStart + i + 1f
+                else -> next
+            }
+            queue.add(k to np)
+        }
     }
-    return Seq(base, next)
+    return Seq(base, next, reveal)
 }
 
 private class TreeCtx(
@@ -345,12 +363,19 @@ private class TreeCtx(
     val anim: LineAnim,
     val layout: String,
     val base: Map<Long, Float>,
+    val reveal: Map<Long, Float>,
     val offsets: Map<Long, Offset>,
     val onOffset: (Long, Offset) -> Unit,
     val onEdit: (Person, Person?) -> Unit,
     val onReorder: (List<Long>) -> Unit
 ) {
     val hasStem: Boolean get() = layout == "top" || layout == "left"
+
+    /** নামের স্বচ্ছতা: অ্যানিমেশনের লাইন নামের কাছে পৌঁছালে ধীরে ধীরে ফুটে ওঠে */
+    fun alphaOf(id: Long): () -> Float = {
+        val r = reveal[id] ?: -1f
+        ((anim.t.value - r) / 0.6f).coerceIn(0f, 1f)
+    }
 }
 
 /** এক সদস্যের নিজের লাইনগুলোর শুরুর ধাপ (-১ মানে এই লাইন নেই) */
@@ -389,6 +414,21 @@ private fun LayoutIcon(kind: String) {
                 line(4f, 7f, 4f, 19f)
                 line(4f, 12.5f, 9f, 12.5f); line(4f, 19f, 9f, 19f)
                 box(9f, 10f, 13f, 5f); box(9f, 16.5f, 13f, 5f)
+            }
+            "spiral" -> {
+                var px = 12f
+                var py = 12f
+                var t = 0f
+                val pi2 = Math.PI.toFloat()
+                while (t <= 4.2f * pi2) {
+                    val r = 1f + t * 0.75f
+                    val x = 12f + r * cos(t)
+                    val y = 12f + r * sin(t)
+                    line(px, py, x, y)
+                    px = x; py = y
+                    t += 0.35f
+                }
+                dot(12f, 12f, 2f)
             }
             "round" -> {
                 line(12f, 12f, 12f, 4.5f); line(12f, 12f, 18.5f, 16f); line(12f, 12f, 5.5f, 16f)
@@ -541,6 +581,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         anim = LineAnim(lineT.asState()),
                         layout = settings.layout,
                         base = seq.base,
+                        reveal = seq.reveal,
                         offsets = settings.offsets,
                         onOffset = { id, o -> settings.setOffset(id, o) },
                         onEdit = onEdit,
@@ -571,11 +612,11 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                                 }
                             }
                         }
-                        "round" -> {
+                        "round", "spiral" -> {
                             ZoomPanBox(Modifier.fillMaxSize(), onTap = onEmptyTap) {
                                 Row(Modifier.padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
                                     roots.forEach { root ->
-                                        RoundTree(root, ctx)
+                                        RoundTree(root, ctx, settings.layout == "spiral")
                                     }
                                 }
                             }
@@ -593,9 +634,8 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         }
                     }
                     // প্রতি প্রজন্মের প্রথম নাম ও মোট কতজন, নিচের ডান কোণে হালকা করে (ট্যাচ আটকায় না)
-                    val gens = remember(persons, hiddenNow, settings.showWives) {
-                        generationCounts(roots, persons, treeOpts)
-                    }
+                    val stats = remember(persons, hiddenNow) { generationCounts(roots, persons, treeOpts) }
+                    val gens = stats.gens
                     if (gens.isNotEmpty()) {
                         Column(
                             Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 6.dp),
@@ -605,8 +645,18 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                             gens.forEach { (name, n) ->
                                 Text("$name: ${bn(n)} জন", color = faint, fontSize = 10.sp, lineHeight = 12.sp)
                             }
-                            Text("মোট: ${bn(gens.sumOf { it.second })} জন", color = faint, fontSize = 10.sp,
-                                lineHeight = 12.sp, fontWeight = FontWeight.Medium)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("মোট: ${bn(gens.sumOf { it.second })} জন", color = faint, fontSize = 10.sp,
+                                    lineHeight = 12.sp, fontWeight = FontWeight.Medium)
+                                // মোট স্ত্রীর সংখ্যা, পাশে গোল বক্সে
+                                if (stats.wives > 0) {
+                                    Box(
+                                        Modifier.padding(start = 5.dp).size(18.dp)
+                                            .border(1.dp, faint, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) { Text(bn(stats.wives), color = faint, fontSize = 9.sp, lineHeight = 10.sp) }
+                                }
+                            }
                         }
                     }
                 }
@@ -842,7 +892,7 @@ private fun SettingsDialog(
                 OutlinedButton(onClick = onAbout, modifier = Modifier.fillMaxWidth()) { Text("About") }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("ঠিক আছে") } }
+        confirmButton = {}
     )
 }
 
@@ -868,10 +918,13 @@ private fun HideNodeRow(
     settings: AppSettings,
     isRoot: Boolean,
     isLast: Boolean,
-    lineColor: Color
+    lineColor: Color,
+    parentHidden: Boolean = false
 ) {
     var rowH by remember { mutableIntStateOf(0) }
     val hidden = node.p.id in settings.hidden
+    // নিজে বা উপরের কেউ লুকানো হলে ঝাপসা দেখায়, তবে সুইচ সবসময় থাকে
+    val dim = hidden || parentHidden
     Column(
         Modifier
             .drawBehind {
@@ -893,17 +946,15 @@ private fun HideNodeRow(
             Text(
                 node.p.name,
                 modifier = Modifier.weight(1f),
-                color = if (hidden) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
+                color = if (dim) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
             )
             Switch(
                 checked = !hidden,
                 onCheckedChange = { settings.toggleHidden(node.p.id) }
             )
         }
-        if (!hidden) {
-            node.kids.forEachIndexed { i, k ->
-                HideNodeRow(k, settings, false, i == node.kids.lastIndex, lineColor)
-            }
+        node.kids.forEachIndexed { i, k ->
+            HideNodeRow(k, settings, false, i == node.kids.lastIndex, lineColor, dim)
         }
     }
 }
@@ -1032,7 +1083,7 @@ private fun ZoomPanBox(
         if (container == IntSize.Zero || contentSize == IntSize.Zero) return 1f
         val sx = container.width.toFloat() / contentSize.width
         val sy = container.height.toFloat() / contentSize.height
-        return if (fitWidthOnly) minOf(1f, sx) else minOf(1f, sx, sy)
+        return if (fitWidthOnly) minOf(1f, sx) * 0.75f else minOf(1f, sx, sy)
     }
 
     fun clampOffset(s: Float, o: Offset): Offset {
@@ -1056,6 +1107,12 @@ private fun ZoomPanBox(
                 scale = s
             }
         }
+    }
+
+    // জুম করা থাকলে প্রথম ব্যাকে জুম আগের অবস্থায় ফেরে, দ্বিতীয় ব্যাকে অ্যাপ থেকে বের হয়
+    val zoomed by remember { derivedStateOf { container != IntSize.Zero && scale > fitScale() * 1.02f } }
+    BackHandler(enabled = zoomed) {
+        zoomTo(fitScale(), Offset(container.width / 2f, container.height / 2f))
     }
 
     // ট্রির আকার বা স্ক্রিন (portrait/landscape) বদলালে আবার ফিট করা
@@ -1137,7 +1194,7 @@ private fun TreeNode(
             .padding(horizontal = if (isRoot) 0.dp else 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        NameButton(person.name, color, dragHandler, shownSpouses.map { it.name }) { ctx.onEdit(person, firstSpouse) }
+        NameButton(person.name, color, dragHandler, shownSpouses.map { it.name }, ctx.alphaOf(person.id)) { ctx.onEdit(person, firstSpouse) }
 
         if (children.isNotEmpty()) {
             LineBox(childColor, 3.dp, 16.dp, true) { ctx.anim.p(u.stem) }
@@ -1224,7 +1281,7 @@ private fun HTreeNode(person: Person, ctx: TreeCtx, path: Set<Long>, isRoot: Boo
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            NameButton(person.name, color, null, shownSpouses.map { it.name }) { ctx.onEdit(person, spouses.firstOrNull()) }
+            NameButton(person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id)) { ctx.onEdit(person, spouses.firstOrNull()) }
         }
         if (children.isNotEmpty()) {
             LineBox(childColor, 14.dp, 3.dp, false) { ctx.anim.p(u.stem) }
@@ -1291,14 +1348,16 @@ private fun ListNode(
             .padding(start = if (isRoot) 0.dp else 22.dp)
     ) {
         Row(
-            Modifier.onSizeChanged { rowH = it.height }.padding(vertical = 4.dp),
+            Modifier.onSizeChanged { rowH = it.height }.padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            NameButton(person.name, color, null, shownSpouses.map { it.name }) { ctx.onEdit(person, spouses.firstOrNull()) }
+            NameButton(person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id)) { ctx.onEdit(person, spouses.firstOrNull()) }
         }
         children.forEachIndexed { i, child ->
             ListNode(child, ctx, newPath, false, i == children.lastIndex, u.conn + 2f * i, u.conn + 2f * i + 1f)
         }
+        // এক বাবার সন্তানরা কাছাকাছি, পরের জনের সন্তানদের আগে একটু ফাঁক
+        if (children.isNotEmpty()) Spacer(Modifier.height(10.dp))
     }
 }
 
@@ -1323,7 +1382,7 @@ private const val NODE_W = 160f
 private const val MARGIN = 220f
 
 /** মূল নাম মাঝখানে, সন্তানরা তাকে ঘিরে ৩৬০° বৃত্তে, নাতি-নাতনিরা আবার তাদের ঘিরে বাইরের দিকে */
-private fun layoutRound(root: RT, offsets: Map<Long, Offset>): RLayout {
+private fun layoutRound(root: RT, offsets: Map<Long, Offset>, spiral: Boolean, key: (Long) -> Long): RLayout {
     val counts = HashMap<Int, Int>()
     fun count(n: RT, d: Int) {
         counts[d] = (counts[d] ?: 0) + 1
@@ -1336,10 +1395,15 @@ private fun layoutRound(root: RT, offsets: Map<Long, Offset>): RLayout {
         radius[d] = maxOf(radius[d - 1] + RING, (counts[d] ?: 0) * RING / (2f * Math.PI.toFloat()))
     }
     val raw = ArrayList<RNode>()
+    val pi = Math.PI.toFloat()
+    val span0 = root.kids.firstOrNull()?.let { 2f * pi * it.leaves / root.leaves } ?: 0f
+    val start = -pi / 2f - span0 / 2f
     fun place(n: RT, d: Int, a0: Float, a1: Float, parent: Long?, idx: Int, acc: Offset) {
         val ang = (a0 + a1) / 2f
-        val bp = if (d == 0) Offset.Zero else Offset(radius[d] * cos(ang), radius[d] * sin(ang))
-        val eff = acc + (offsets[n.p.id] ?: Offset.Zero)
+        // স্পাইরাল: প্রতি প্রজন্মের দূরত্ব কোণ ধরে একটু একটু করে বাড়ে (বৃত্তের বদলে প্যাঁচানো)
+        val r = if (d == 0) 0f else radius[d] + (if (spiral) ((ang - start) / (2f * pi) - 0.5f) * RING * 0.9f else 0f)
+        val bp = if (d == 0) Offset.Zero else Offset(r * cos(ang), r * sin(ang))
+        val eff = acc + (offsets[key(n.p.id)] ?: Offset.Zero)
         raw.add(RNode(n, bp, bp + eff, parent, idx))
         var s = a0
         val total = n.leaves.toFloat()
@@ -1349,9 +1413,6 @@ private fun layoutRound(root: RT, offsets: Map<Long, Offset>): RLayout {
             s += span
         }
     }
-    val pi = Math.PI.toFloat()
-    val span0 = root.kids.firstOrNull()?.let { 2f * pi * it.leaves / root.leaves } ?: 0f
-    val start = -pi / 2f - span0 / 2f
     place(root, 0, start, start + 2f * pi, null, 0, Offset.Zero)
 
     val minX = raw.minOf { it.base.x }
@@ -1375,14 +1436,16 @@ private fun layoutRound(root: RT, offsets: Map<Long, Offset>): RLayout {
  * সরানো জায়গা ফোনে সংরক্ষিত থাকে।
  */
 @Composable
-private fun RoundTree(root: Person, ctx: TreeCtx) {
+private fun RoundTree(root: Person, ctx: TreeCtx, spiral: Boolean = false) {
     val rt = remember(ctx.all, ctx.opts, root.id) { buildRT(root, ctx, emptySet()) }
     var dragId by remember { mutableStateOf<Long?>(null) }
     var dragDelta by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current.density
     val did = dragId
-    val offs = if (did != null) ctx.offsets + (did to ((ctx.offsets[did] ?: Offset.Zero) + dragDelta)) else ctx.offsets
-    val lay = layoutRound(rt, offs)
+    // গোল ও স্পাইরাল ভিউয়ের সরানো জায়গা আলাদা সংরক্ষিত হয়
+    val key: (Long) -> Long = { if (spiral) -it - 1 else it }
+    val offs = if (did != null) ctx.offsets + (key(did) to ((ctx.offsets[key(did)] ?: Offset.Zero) + dragDelta)) else ctx.offsets
+    val lay = layoutRound(rt, offs, spiral, key)
     val byId = lay.nodes.associateBy { it.rt.p.id }
 
     Box(
@@ -1443,13 +1506,14 @@ private fun RoundTree(root: Person, ctx: TreeCtx) {
                             onStart = { dragId = id; dragDelta = Offset.Zero },
                             onMove = { dx, dy -> dragDelta += Offset(dx / density, dy / density) },
                             onEnd = {
-                                ctx.onOffset(id, (ctx.offsets[id] ?: Offset.Zero) + dragDelta)
+                                ctx.onOffset(key(id), (ctx.offsets[key(id)] ?: Offset.Zero) + dragDelta)
                                 dragId = null
                                 dragDelta = Offset.Zero
                             },
                             onCancel = { dragId = null; dragDelta = Offset.Zero }
                         ),
-                        spouseNames = shown.map { it.name }
+                        spouseNames = shown.map { it.name },
+                        alphaOf = ctx.alphaOf(id)
                     ) { ctx.onEdit(n.rt.p, sp.firstOrNull()) }
                 }
             }
@@ -1464,12 +1528,14 @@ private fun NameButton(
     color: Color,
     dragHandler: DragCallbacks?,
     spouseNames: List<String> = emptyList(),
+    alphaOf: () -> Float = { 1f },
     onClick: () -> Unit
 ) {
     val currentClick by rememberUpdatedState(onClick)
     val currentDrag by rememberUpdatedState(dragHandler)
     Box(
         Modifier
+            .graphicsLayer { this.alpha = alphaOf() }
             .clip(RoundedCornerShape(10.dp))
             .background(color)
             .pointerInput(Unit) {
