@@ -72,3 +72,7 @@ h1{margin:0;font-size:1.6rem;letter-spacing:0.2px}
 .who{margin-top:22px}
 /* বাটন দুটো একেবারে নিচে */
 .actions{margin-top:auto;padding-top:20px}
+
+/* আয়াত: একটা একটা করে শব্দ ফুটে ওঠে */
+.verse .w{opacity:0;display:inline-block;animation:wordIn .45s ease-out forwards;animation-delay:calc(var(--i) * 0.11s + .3s)}
+@keyframes wordIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
