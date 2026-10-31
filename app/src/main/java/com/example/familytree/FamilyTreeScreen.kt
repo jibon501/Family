@@ -95,6 +95,11 @@ import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
+import kotlin.math.roundToInt
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.unit.sp
 
 /** ডায়ালগ খোলার তথ্য: person = null মানে নতুন সদস্য, সাথে বাবা/মায়ের ডিফল্ট */
 private data class DialogState(
@@ -279,6 +284,35 @@ private fun connLen(layout: String, n: Int): Float = when (layout) {
     else -> if (n == 1) 1f else 1.5f + 0.5f * n
 }
 
+/**
+ * এক ধাপ আঁকতে কত মিলিসেকেন্ড: ধাপ কম হলে (কম সদস্য) ধীরে, বেশি হলে দ্রুত।
+ * ৪ ধাপে ≈৪৪০ms, ৬০ ধাপে ≈১৬৭ms, ২০০ ধাপে ≈৬৫ms, তার বেশিতে আরও দ্রুত।
+ */
+private fun msPerUnit(total: Float): Float =
+    (500f / (1f + total / 30f)).coerceIn(20f, 450f)
+
+/** প্রজন্ম ধরে দেখানো সদস্যের সংখ্যা (হাইড করা বাদ; স্ত্রীর নাম চালু থাকলে স্ত্রীসহ) */
+private fun generationCounts(roots: List<Person>, all: List<Person>, opts: TreeOpts): List<Int> {
+    val counts = ArrayList<Int>()
+    var level: List<Pair<Person, Set<Long>>> = roots.map { it to emptySet<Long>() }
+    while (level.isNotEmpty()) {
+        var n = 0
+        val next = ArrayList<Pair<Person, Set<Long>>>()
+        level.forEach { (p, path) ->
+            val sp = spousesOf(p, all)
+            n += 1 + (if (opts.showWives) sp.size else 0)
+            val np = path + p.id + sp.map { it.id }
+            childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }.forEach { next.add(it to np) }
+        }
+        counts.add(n)
+        level = next
+    }
+    return counts
+}
+
+private fun bn(n: Int): String =
+    n.toString().map { if (it in '0'..'9') "০১২৩৪৫৬৭৮৯"[it - '0'] else it }.joinToString("")
+
 /** প্রতিটি সদস্যের লাইনগুলো কত ধাপ থেকে শুরু, আর মোট কত ধাপ */
 private class Seq(val base: Map<Long, Float>, val total: Float)
 
@@ -455,7 +489,9 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     LaunchedEffect(settings.layout, replay, persons.isNotEmpty()) {
         animDone = false
         lineT.snapTo(0f)
-        lineT.animateTo(totalNow, tween((totalNow * 140f).toInt().coerceAtLeast(1), easing = LinearEasing))
+        // কম সদস্য দেখালে ধীরে, বেশি সদস্য দেখালে দ্রুত
+        val ms = (totalNow * msPerUnit(totalNow)).toInt().coerceAtLeast(1)
+        lineT.animateTo(totalNow, tween(ms, easing = LinearEasing))
         lineT.snapTo(totalNow)
         animDone = true
     }
@@ -536,10 +572,10 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                             }
                         }
                         "round" -> {
-                            ZoomPanBox(Modifier.fillMaxSize(), onTap = onEmptyTap) {
+                            ZoomPanBox(Modifier.fillMaxSize(), onTap = onEmptyTap) { zoom ->
                                 Row(Modifier.padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
                                     roots.forEach { root ->
-                                        RoundTree(root, ctx)
+                                        RoundTree(root, ctx, zoom)
                                     }
                                 }
                             }
@@ -554,6 +590,22 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                                     }
                                 }
                             }
+                        }
+                    }
+                    // প্রতি প্রজন্মে মোট কতজন, নিচের কোণে হালকা করে (ট্যাচ আটকায় না)
+                    val gens = remember(persons, hiddenNow, settings.showWives) {
+                        generationCounts(roots, persons, treeOpts)
+                    }
+                    if (gens.isNotEmpty()) {
+                        Column(
+                            Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = 6.dp)
+                        ) {
+                            val faint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                            gens.forEachIndexed { i, n ->
+                                Text("প্রজন্ম ${bn(i + 1)}: ${bn(n)} জন", color = faint, fontSize = 10.sp, lineHeight = 12.sp)
+                            }
+                            Text("মোট: ${bn(gens.sum())} জন", color = faint, fontSize = 10.sp, lineHeight = 12.sp,
+                                fontWeight = FontWeight.Medium)
                         }
                     }
                 }
@@ -869,8 +921,9 @@ private fun HideNodeRow(
 }
 
 /**
- * শো/হাইড: যাদের নিচে ট্রি আছে তাদের নাম, কানেকশন লাইনসহ। বন্ধ করলে সেই নাম ও তার নিচের সবাই লুকায়।
- * পেছনে অন্ধকার পর্দা নেই, ট্রি স্ক্রিন পরিষ্কার দেখা যায়, তাই সুইচ বদলালেই ট্রির পরিবর্তন চোখে পড়ে।
+ * শো/হাইড: যাদের নিচে ট্রি আছে তাদের নাম, কানেকশন লাইনসহ। সুইচ অন/অফ করলেই সাথে সাথে ট্রিতে কার্যকর হয়।
+ * "ঠিক আছে" বাটন নেই: প্যানেলের বাইরে ফাঁকা জায়গায় ট্যাপ করলে (বা ব্যাক চাপলে) প্যানেল আবার লুকিয়ে যায়।
+ * পেছনে অন্ধকার পর্দা নেই, ট্রি স্ক্রিন পরিষ্কার দেখা যায়।
  */
 @Composable
 private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: () -> Unit) {
@@ -882,18 +935,31 @@ private fun ShowHideDialog(all: List<Person>, settings: AppSettings, onDismiss: 
     ) {
         val view = LocalView.current
         SideEffect { (view.parent as? DialogWindowProvider)?.window?.setDimAmount(0f) }
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                // ফাঁকা জায়গায় ট্যাপ = বন্ধ
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onDismiss() },
+            contentAlignment = Alignment.BottomCenter
+        ) {
             Surface(
                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
                 tonalElevation = 6.dp,
                 shadowElevation = 8.dp,
-                modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp)
+                    // প্যানেলের ভেতরের ফাঁকা জায়গায় ট্যাপে যেন বন্ধ না হয়
+                    .pointerInput(Unit) { detectTapGestures { } }
             ) {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("শো/হাইড", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                        TextButton(onClick = onDismiss) { Text("ঠিক আছে") }
-                    }
+                    Text("শো/হাইড", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "সুইচ বদলালেই কার্যকর হবে। বাইরে ট্যাপ করলে বন্ধ হবে।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
                     if (tree.isEmpty()) {
                         Text("যাদের নিচে ট্রি আছে এমন কোনো নাম এখনো নেই।")
                     } else {
@@ -965,7 +1031,7 @@ private fun ZoomPanBox(
     fitWidthOnly: Boolean = false,
     alignBottom: Boolean = false,
     onTap: () -> Unit = {},
-    content: @Composable () -> Unit
+    content: @Composable (zoom: () -> Float) -> Unit
 ) {
     var container by remember { mutableStateOf(IntSize.Zero) }
     var contentSize by remember { mutableStateOf(IntSize.Zero) }
@@ -1002,6 +1068,12 @@ private fun ZoomPanBox(
                 scale = s
             }
         }
+    }
+
+    // ফিট অবস্থার তুলনায় এখন কতগুণ জুম (১ = পুরো ট্রি দেখা যাচ্ছে)
+    val zoomRel: () -> Float = {
+        val f = fitScale()
+        if (f > 0f) (scale / f).coerceAtLeast(1f) else 1f
     }
 
     // ট্রির আকার বা স্ক্রিন (portrait/landscape) বদলালে আবার ফিট করা
@@ -1047,7 +1119,7 @@ private fun ZoomPanBox(
                     translationY = offset.y
                     transformOrigin = TransformOrigin(0f, 0f)
                 }
-        ) { content() }
+        ) { content(zoomRel) }
     }
 }
 
@@ -1285,7 +1357,7 @@ private const val NODE_W = 160f
 private const val MARGIN = 220f
 
 /** মূল নাম মাঝখানে, সন্তানরা তাকে ঘিরে ৩৬০° বৃত্তে, নাতি-নাতনিরা আবার তাদের ঘিরে বাইরের দিকে */
-private fun layoutRound(root: RT, offsets: Map<Long, Offset>): RLayout {
+private fun layoutRound(root: RT, offsets: Map<Long, Offset>, k: Float = 1f): RLayout {
     val counts = HashMap<Int, Int>()
     fun count(n: RT, d: Int) {
         counts[d] = (counts[d] ?: 0) + 1
@@ -1301,8 +1373,9 @@ private fun layoutRound(root: RT, offsets: Map<Long, Offset>): RLayout {
     fun place(n: RT, d: Int, a0: Float, a1: Float, parent: Long?, idx: Int, acc: Offset) {
         val ang = (a0 + a1) / 2f
         val bp = if (d == 0) Offset.Zero else Offset(radius[d] * cos(ang), radius[d] * sin(ang))
+        // জুম করলে (k < 1) নামগুলো মূল নামের দিকে গুটিয়ে আসে; বাক্সের আকার (base) একই থাকে
         val eff = acc + (offsets[n.p.id] ?: Offset.Zero)
-        raw.add(RNode(n, bp, bp + eff, parent, idx))
+        raw.add(RNode(n, bp, Offset(bp.x * k, bp.y * k) + eff, parent, idx))
         var s = a0
         val total = n.leaves.toFloat()
         n.kids.forEachIndexed { i, k ->
@@ -1337,14 +1410,19 @@ private fun layoutRound(root: RT, offsets: Map<Long, Offset>): RLayout {
  * সরানো জায়গা ফোনে সংরক্ষিত থাকে।
  */
 @Composable
-private fun RoundTree(root: Person, ctx: TreeCtx) {
+private fun RoundTree(root: Person, ctx: TreeCtx, zoom: () -> Float) {
     val rt = remember(ctx.all, ctx.opts, root.id) { buildRT(root, ctx, emptySet()) }
     var dragId by remember { mutableStateOf<Long?>(null) }
     var dragDelta by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current.density
     val did = dragId
     val offs = if (did != null) ctx.offsets + (did to ((ctx.offsets[did] ?: Offset.Zero) + dragDelta)) else ctx.offsets
-    val lay = layoutRound(rt, offs)
+    // জুম বাড়লে লম্বা লাইন আপনা-আপনি ছোট হয়ে আসে (সর্বোচ্চ অর্ধেক পর্যন্ত), ধীরে ধীরে নরম ভাবে
+    val kTarget by remember(zoom) {
+        derivedStateOf { ((1f / sqrt(zoom())).coerceIn(0.5f, 1f) * 40f).roundToInt() / 40f }
+    }
+    val k by animateFloatAsState(kTarget, tween(160), label = "roundCompact")
+    val lay = layoutRound(rt, offs, k)
     val byId = lay.nodes.associateBy { it.rt.p.id }
 
     Box(
