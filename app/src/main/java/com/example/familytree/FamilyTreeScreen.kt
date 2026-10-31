@@ -1140,11 +1140,29 @@ private fun ZoomPanBox(
         zoomTo(fitScale(), Offset(container.width / 2f, container.height / 2f))
     }
 
-    // ট্রির আকার বা স্ক্রিন (portrait/landscape) বদলালে আবার ফিট করা
-    LaunchedEffect(container, contentSize) {
+    // ফিট করা: প্রথমবার ট্রি মাপা হলে, আর স্ক্রিন (portrait/landscape) বদলালে।
+    // নাম লুকালে/দেখালে ট্রির আকার বদলায়, কিন্তু তখন জুম বা অবস্থান বদলায় না; পরের জুম/টানার সময় নিজে সাজে।
+    var fitted by remember { mutableStateOf(false) }
+    LaunchedEffect(container) {
         if (container != IntSize.Zero && contentSize != IntSize.Zero) {
             scale = fitScale()
             offset = clampOffset(scale, Offset.Zero)
+            fitted = true
+        }
+    }
+    LaunchedEffect(contentSize) {
+        if (container == IntSize.Zero || contentSize == IntSize.Zero) return@LaunchedEffect
+        if (!fitted) {
+            scale = fitScale()
+            offset = clampOffset(scale, Offset.Zero)
+            fitted = true
+        } else {
+            // ট্রি ছোট হয়ে পুরোটা পর্দার বাইরে চলে গেলে তবেই অবস্থান ঠিক করা
+            val w = contentSize.width * scale
+            val h = contentSize.height * scale
+            val visible = offset.x + w > 0f && offset.x < container.width &&
+                offset.y + h > 0f && offset.y < container.height
+            if (!visible) offset = clampOffset(scale, offset)
         }
     }
 
