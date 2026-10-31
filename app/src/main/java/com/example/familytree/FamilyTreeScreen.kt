@@ -67,6 +67,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -116,7 +117,12 @@ private data class DialogState(
 private enum class Pos { NONE, ONLY, FIRST, MIDDLE, LAST }
 
 /** সেটিংস অনুযায়ী ট্রিতে কী দেখানো হবে: স্ত্রীর নাম, আর যাদের লুকানো হয়েছে */
-private data class TreeOpts(val showWives: Boolean, val hidden: Set<Long>)
+private data class TreeOpts(val showWives: Boolean, val hidden: Set<Long>, val collapsed: Set<Long> = emptySet())
+
+/** দেখানো সন্তান: যাকে লুকানো হয়েছে তাকে বাদ; নাম চেপে গুটিয়ে রাখলে তার নিচে কেউ নেই */
+private fun visibleKids(p: Person, sp: List<Person>, all: List<Person>, path: Set<Long>, opts: TreeOpts): List<Person> =
+    if (p.id in opts.collapsed) emptyList()
+    else childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }
 
 /**
  * ডায়ালগের বাবা/মা/স্ত্রীর ঘর: id থাকলে তালিকা থেকে বাছা, না থাকলে লেখা নাম।
@@ -312,7 +318,7 @@ private fun generationCounts(roots: List<Person>, all: List<Person>, opts: TreeO
             n += 1
             wives += sp.size
             val np = path + p.id + sp.map { it.id }
-            childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }.forEach { next.add(it to np) }
+            visibleKids(p, sp, all, path, opts).forEach { next.add(it to np) }
         }
         counts.add(level.first().first.name to n)
         level = next
@@ -326,8 +332,31 @@ private fun bn(n: Int): String =
 /** প্রতিটি সদস্যের লাইনগুলো কত ধাপ থেকে শুরু, আর মোট কত ধাপ */
 private class Seq(val base: Map<Long, Float>, val total: Float, val reveal: Map<Long, Float>)
 
+/**
+ * তালিকা ভিউ: উপর থেকে নিচে ক্রমে। প্রতিটি নামের নিজের আসা-লাইন (নামা + আড়াআড়ি, ২ ধাপ) একটার পর একটা,
+ * একজনের সবটা (তার নিচের সবাই) শেষ হয়ে তারপর পরের জন।
+ */
+private fun buildSeqList(roots: List<Person>, all: List<Person>, opts: TreeOpts): Seq {
+    val base = HashMap<Long, Float>()
+    val reveal = HashMap<Long, Float>()
+    var next = 0f
+    fun visit(p: Person, path: Set<Long>, isRoot: Boolean) {
+        if (!isRoot) {
+            base[p.id] = next
+            next += 2f
+            reveal[p.id] = next
+        }
+        val sp = spousesOf(p, all)
+        val np = path + p.id + sp.map { it.id }
+        visibleKids(p, sp, all, path, opts).forEach { visit(it, np, false) }
+    }
+    roots.forEach { visit(it, emptySet(), true) }
+    return Seq(base, next, reveal)
+}
+
 /** প্রজন্ম ধরে, প্রতি প্রজন্মে বাম থেকে ডানে ধাপ বসানো */
 private fun buildSeq(roots: List<Person>, all: List<Person>, opts: TreeOpts, layout: String): Seq {
+    if (layout == "list") return buildSeqList(roots, all, opts)
     val hasStem = layout == "top" || layout == "left"
     val base = HashMap<Long, Float>()
     // কোন নাম কখন দেখা দেবে: যে লাইন তার কাছে পৌঁছায় সেটা শেষ হলে (মূল নাম শুরু থেকেই দেখা যায়)
@@ -338,7 +367,7 @@ private fun buildSeq(roots: List<Person>, all: List<Person>, opts: TreeOpts, lay
     while (queue.isNotEmpty()) {
         val (p, path) = queue.removeFirst()
         val sp = spousesOf(p, all)
-        val kids = childrenOf(p, sp, all, path).filter { it.id !in opts.hidden }
+        val kids = visibleKids(p, sp, all, path, opts)
         base[p.id] = next
         val connStart = next + (if (hasStem && kids.isNotEmpty()) 1f else 0f)
         next += (if (hasStem && kids.isNotEmpty()) 1f else 0f) +
@@ -367,6 +396,7 @@ private class TreeCtx(
     val offsets: Map<Long, Offset>,
     val onOffset: (Long, Offset) -> Unit,
     val onEdit: (Person, Person?) -> Unit,
+    val onToggle: (Person) -> Unit,
     val onReorder: (List<Long>) -> Unit
 ) {
     val hasStem: Boolean get() = layout == "top" || layout == "left"
@@ -515,8 +545,10 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
     // হাইড চালু থাকলে শো/হাইড তালিকার লুকানো নামগুলো বাদ, আনহাইড করলে সব দেখায়
     val hiddenNow = if (settings.hideActive) settings.hidden else emptySet()
     val roots = allRoots.filter { it.id !in hiddenNow }
-    val treeOpts = TreeOpts(settings.showWives, hiddenNow)
-    val seq = remember(persons, hiddenNow, settings.showWives, settings.layout) {
+    // নামে চাপ দিলে তার নিচের সবাই গুটিয়ে যায় / আবার দেখা দেয়
+    var collapsed by remember { mutableStateOf(setOf<Long>()) }
+    val treeOpts = TreeOpts(settings.showWives, hiddenNow, collapsed)
+    val seq = remember(persons, hiddenNow, collapsed, settings.showWives, settings.layout) {
         buildSeq(roots, persons, treeOpts, settings.layout)
     }
 
@@ -585,6 +617,11 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         offsets = settings.offsets,
                         onOffset = { id, o -> settings.setOffset(id, o) },
                         onEdit = onEdit,
+                        onToggle = { p ->
+                            val has = childrenOf(p, spousesOf(p, persons), persons, emptySet()).isNotEmpty()
+                            if (p.id in collapsed) collapsed = collapsed - p.id
+                            else if (has) collapsed = collapsed + p.id
+                        },
                         onReorder = { viewModel.reorder(it) }
                     )
                     // ফাঁকা জায়গায় একবার চাপলে লাইন অ্যানিমেশন আবার চলে
@@ -634,7 +671,7 @@ fun FamilyTreeScreen(viewModel: FamilyViewModel, settings: AppSettings) {
                         }
                     }
                     // প্রতি প্রজন্মের প্রথম নাম ও মোট কতজন, নিচের ডান কোণে হালকা করে (ট্যাচ আটকায় না)
-                    val stats = remember(persons, hiddenNow) { generationCounts(roots, persons, treeOpts) }
+                    val stats = remember(persons, hiddenNow, collapsed) { generationCounts(roots, persons, treeOpts) }
                     val gens = stats.gens
                     if (gens.isNotEmpty()) {
                         Column(
@@ -1182,7 +1219,7 @@ private fun TreeNode(
     val all = ctx.all
     val spouses = spousesOf(person, all)
     val shownSpouses = if (ctx.opts.showWives) spouses else emptyList()
-    val children = childrenOf(person, spouses, all, path).filter { it.id !in ctx.opts.hidden }
+    val children = visibleKids(person, spouses, all, path, ctx.opts)
     val color = ctx.colors[person.id] ?: Palette[0]
     val childColor = children.firstOrNull()?.let { ctx.colors[it.id] } ?: color
     val firstSpouse = spouses.firstOrNull()
@@ -1194,7 +1231,11 @@ private fun TreeNode(
             .padding(horizontal = if (isRoot) 0.dp else 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        NameButton(person.name, color, dragHandler, shownSpouses.map { it.name }, ctx.alphaOf(person.id)) { ctx.onEdit(person, firstSpouse) }
+        NameButton(
+            person.name, color, dragHandler, shownSpouses.map { it.name }, ctx.alphaOf(person.id),
+            collapsedKids = collapsedKidsOf(person, ctx),
+            onLongClick = { ctx.onEdit(person, firstSpouse) }
+        ) { ctx.onToggle(person) }
 
         if (children.isNotEmpty()) {
             LineBox(childColor, 3.dp, 16.dp, true) { ctx.anim.p(u.stem) }
@@ -1271,7 +1312,7 @@ private fun HTreeNode(person: Person, ctx: TreeCtx, path: Set<Long>, isRoot: Boo
     val all = ctx.all
     val spouses = spousesOf(person, all)
     val shownSpouses = if (ctx.opts.showWives) spouses else emptyList()
-    val children = childrenOf(person, spouses, all, path).filter { it.id !in ctx.opts.hidden }
+    val children = visibleKids(person, spouses, all, path, ctx.opts)
     val color = ctx.colors[person.id] ?: Palette[0]
     val childColor = children.firstOrNull()?.let { ctx.colors[it.id] } ?: color
     val u = unitsOf(ctx, person.id, shownSpouses.isNotEmpty(), children.isNotEmpty())
@@ -1281,7 +1322,11 @@ private fun HTreeNode(person: Person, ctx: TreeCtx, path: Set<Long>, isRoot: Boo
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            NameButton(person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id)) { ctx.onEdit(person, spouses.firstOrNull()) }
+            NameButton(
+                person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id),
+                collapsedKids = collapsedKidsOf(person, ctx),
+                onLongClick = { ctx.onEdit(person, spouses.firstOrNull()) }
+            ) { ctx.onToggle(person) }
         }
         if (children.isNotEmpty()) {
             LineBox(childColor, 14.dp, 3.dp, false) { ctx.anim.p(u.stem) }
@@ -1326,7 +1371,7 @@ private fun ListNode(
     val all = ctx.all
     val spouses = spousesOf(person, all)
     val shownSpouses = if (ctx.opts.showWives) spouses else emptyList()
-    val children = childrenOf(person, spouses, all, path).filter { it.id !in ctx.opts.hidden }
+    val children = visibleKids(person, spouses, all, path, ctx.opts)
     val color = ctx.colors[person.id] ?: Palette[0]
     val newPath = path + person.id + spouses.map { it.id }
     val u = unitsOf(ctx, person.id, shownSpouses.isNotEmpty(), children.isNotEmpty())
@@ -1351,10 +1396,14 @@ private fun ListNode(
             Modifier.onSizeChanged { rowH = it.height }.padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            NameButton(person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id)) { ctx.onEdit(person, spouses.firstOrNull()) }
+            NameButton(
+                person.name, color, null, shownSpouses.map { it.name }, ctx.alphaOf(person.id),
+                collapsedKids = collapsedKidsOf(person, ctx),
+                onLongClick = { ctx.onEdit(person, spouses.firstOrNull()) }
+            ) { ctx.onToggle(person) }
         }
         children.forEachIndexed { i, child ->
-            ListNode(child, ctx, newPath, false, i == children.lastIndex, u.conn + 2f * i, u.conn + 2f * i + 1f)
+            ListNode(child, ctx, newPath, false, i == children.lastIndex, ctx.base[child.id] ?: 0f, (ctx.base[child.id] ?: 0f) + 1f)
         }
         // এক বাবার সন্তানরা কাছাকাছি, পরের জনের সন্তানদের আগে একটু ফাঁক
         if (children.isNotEmpty()) Spacer(Modifier.height(10.dp))
@@ -1367,7 +1416,7 @@ private class RT(val p: Person, val kids: List<RT>, val leaves: Int, val spouses
 
 private fun buildRT(p: Person, ctx: TreeCtx, path: Set<Long>): RT {
     val sp = spousesOf(p, ctx.all)
-    val kids = childrenOf(p, sp, ctx.all, path).filter { it.id !in ctx.opts.hidden }
+    val kids = visibleKids(p, sp, ctx.all, path, ctx.opts)
     val np = path + p.id + sp.map { it.id }
     val kt = kids.map { buildRT(it, ctx, np) }
     return RT(p, kt, if (kt.isEmpty()) 1 else kt.sumOf { it.leaves }, if (ctx.opts.showWives) sp.size else 0)
@@ -1513,15 +1562,28 @@ private fun RoundTree(root: Person, ctx: TreeCtx, spiral: Boolean = false) {
                             onCancel = { dragId = null; dragDelta = Offset.Zero }
                         ),
                         spouseNames = shown.map { it.name },
-                        alphaOf = ctx.alphaOf(id)
-                    ) { ctx.onEdit(n.rt.p, sp.firstOrNull()) }
+                        alphaOf = ctx.alphaOf(id),
+                        collapsedKids = collapsedKidsOf(n.rt.p, ctx),
+                        onLongClick = { ctx.onEdit(n.rt.p, sp.firstOrNull()) }
+                    ) { ctx.onToggle(n.rt.p) }
                 }
             }
         }
     }
 }
 
-/** শুধু নামের বাটন। চাপলে তথ্য খোলে; লম্বা চেপে ধরে টানলে (dragHandler থাকলে) সরানো যায় */
+/** গুটিয়ে রাখা নামের নিচে কতজন সরাসরি সন্তান লুকিয়ে আছে (গুটানো না থাকলে ০) */
+private fun collapsedKidsOf(p: Person, ctx: TreeCtx): Int =
+    if (p.id in ctx.opts.collapsed)
+        childrenOf(p, spousesOf(p, ctx.all), ctx.all, emptySet()).count { it.id !in ctx.opts.hidden }
+    else 0
+
+/**
+ * নামের বাটন:
+ *  - একবার চাপ: তার নিচের সব নাম লুকায় / আবার দেখা দেয়
+ *  - চেপে ধরে ছাড়লে: সদস্যের তথ্য বক্স (onLongClick)
+ *  - চেপে ধরে টানলে (dragHandler থাকলে): সরানো / ক্রম বদল
+ */
 @Composable
 private fun NameButton(
     name: String,
@@ -1529,9 +1591,12 @@ private fun NameButton(
     dragHandler: DragCallbacks?,
     spouseNames: List<String> = emptyList(),
     alphaOf: () -> Float = { 1f },
+    collapsedKids: Int = 0,
+    onLongClick: () -> Unit = {},
     onClick: () -> Unit
 ) {
     val currentClick by rememberUpdatedState(onClick)
+    val currentLong by rememberUpdatedState(onLongClick)
     val currentDrag by rememberUpdatedState(dragHandler)
     Box(
         Modifier
@@ -1544,17 +1609,30 @@ private fun NameButton(
                     val longPress = awaitLongPressOrCancellation(down.id)
                     if (longPress != null) {
                         val d = currentDrag
-                        if (d != null) {
-                            d.onStart()
-                            val done = drag(longPress.id) { change ->
-                                change.consume()
-                                val dl = change.positionChange()
-                                d.onMove(dl.x, dl.y)
+                        val slop = viewConfiguration.touchSlop
+                        var started = false
+                        var total = Offset.Zero
+                        var upNormally = false
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull { it.id == longPress.id } ?: break
+                            if (ch.changedToUpIgnoreConsumed()) { ch.consume(); upNormally = true; break }
+                            if (!ch.pressed) break
+                            val dl = ch.positionChange()
+                            if (d != null && dl != Offset.Zero) {
+                                ch.consume()
+                                total += dl
+                                if (!started && total.getDistance() > slop) {
+                                    started = true
+                                    d.onStart()
+                                    d.onMove(total.x, total.y)
+                                } else if (started) {
+                                    d.onMove(dl.x, dl.y)
+                                }
                             }
-                            if (done) d.onEnd() else d.onCancel()
-                        } else {
-                            waitForUpOrCancellation()?.let { it.consume(); currentClick() }
                         }
+                        if (started) { if (upNormally) d?.onEnd() else d?.onCancel() }
+                        else if (upNormally) currentLong()
                     } else {
                         val up = currentEvent.changes.firstOrNull { it.id == down.id }
                         if (up != null && !up.pressed) {
@@ -1568,7 +1646,13 @@ private fun NameButton(
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(name, color = Color.White, fontWeight = FontWeight.Medium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(name, color = Color.White, fontWeight = FontWeight.Medium)
+                // গুটানো থাকলে নিচে কতজন লুকিয়ে আছে
+                if (collapsedKids > 0) {
+                    Text("  +${bn(collapsedKids)}", color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp)
+                }
+            }
             // স্ত্রীর নাম স্বামীর ঘরেই, ছোট করে হালকা ধূসর
             spouseNames.forEach {
                 Text(it, color = Color(0xFFD0D0D0), fontSize = 11.sp, lineHeight = 13.sp)
@@ -1913,7 +1997,7 @@ private fun AboutScreen(version: String, onDismiss: () -> Unit) {
                 }
             )
             Text(
-                version,
+                "version $version",
                 color = Color(0xFF9AA4B2).copy(alpha = 0.6f),
                 fontSize = 11.sp,
                 textAlign = TextAlign.Center,
