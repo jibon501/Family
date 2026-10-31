@@ -15,11 +15,15 @@ body{
   justify-content:center;
   min-height:100vh;
   margin:0;
-  padding:20px;
+  padding:14px;
 }
 .card{
   width:100%;
   max-width:420px;
+  /* পুরো স্ক্রিন জুড়ে: উপরে নাম ও আয়াত, মাঝে ছবি ও তথ্য, একেবারে নিচে বাটন */
+  min-height:calc(100vh - 28px);
+  display:flex;
+  flex-direction:column;
   background:var(--card);
   border-radius:16px;
   padding:28px;
@@ -59,3 +63,12 @@ h1{margin:0;font-size:1.6rem;letter-spacing:0.2px}
 @media (max-width:420px){
   .card{padding:20px;border-radius:12px}
 }
+
+/* আমার পরিবার: নাম ও আয়াত (উপরে) */
+.top{text-align:center}
+.app{margin:0 0 8px;font-size:1.5rem;color:var(--accent)}
+.verse{margin:0;color:var(--muted);font-size:0.74rem;line-height:1.5}
+.verse .ref{display:inline-block;margin-top:2px;opacity:.85}
+.who{margin-top:22px}
+/* বাটন দুটো একেবারে নিচে */
+.actions{margin-top:auto;padding-top:20px}
