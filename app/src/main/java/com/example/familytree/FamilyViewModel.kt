@@ -13,7 +13,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -138,14 +142,31 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
         return (app.getExternalFilesDir(null) ?: app.filesDir).also { it.mkdirs() }
     }
 
-    /** ডাটা ফোল্ডারে আজকের তারিখ নামে (যেমন 2026-10-28.json) ব্যাকআপ রাখে। সফল হলে ফাইলের পথ দেয় */
+    /** ZIP হলে ভেতরের প্রথম ফাইল, নইলে সরাসরি JSON লেখা হিসেবে পড়ে (পুরনো .json ব্যাকআপও চলবে) */
+    private fun decode(bytes: ByteArray): String {
+        val isZip = bytes.size > 3 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
+        if (!isZip) return bytes.toString(Charsets.UTF_8)
+        ZipInputStream(ByteArrayInputStream(bytes)).use { z ->
+            while (true) {
+                val e = z.nextEntry ?: break
+                if (!e.isDirectory) return z.readBytes().toString(Charsets.UTF_8)
+            }
+        }
+        error("zip খালি")
+    }
+
+    /** ডাটা ফোল্ডারে আজকের তারিখ নামে (যেমন 2026-10-28.zip) ZIP ব্যাকআপ রাখে। সফল হলে ফাইলের পথ দেয় */
     fun backupToFolder(onResult: (String?) -> Unit) {
         viewModelScope.launch {
             val path = withContext(Dispatchers.IO) {
                 runCatching {
-                    val name = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) + ".json"
-                    val f = File(backupDir(), name)
-                    f.writeText(toJson(dao.getAll()), Charsets.UTF_8)
+                    val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                    val f = File(backupDir(), "$day.zip")
+                    ZipOutputStream(f.outputStream().buffered()).use { z ->
+                        z.putNextEntry(ZipEntry("$day.json"))
+                        z.write(toJson(dao.getAll()).toByteArray(Charsets.UTF_8))
+                        z.closeEntry()
+                    }
                     f.absolutePath
                 }.getOrNull()
             }
@@ -155,11 +176,11 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
 
     /** ডাটা ফোল্ডারের ব্যাকআপ ফাইল, নতুন আগে */
     fun listBackups(): List<File> =
-        backupDir().listFiles { f -> f.isFile && f.extension == "json" }
+        backupDir().listFiles { f -> f.isFile && (f.extension == "zip" || f.extension == "json") }
             ?.sortedByDescending { it.name } ?: emptyList()
 
     fun restoreFromFile(file: File, onResult: (Boolean) -> Unit) {
-        restore(onResult) { file.readText(Charsets.UTF_8) }
+        restore(onResult) { decode(file.readBytes()) }
     }
 
     /** অন্য জায়গার JSON ফাইল থেকে রিস্টোর */
@@ -167,7 +188,7 @@ class FamilyViewModel(app: Application) : AndroidViewModel(app) {
         restore(onResult) {
             getApplication<Application>().contentResolver
                 .openInputStream(uri)!!
-                .use { it.readBytes().toString(Charsets.UTF_8) }
+                .use { decode(it.readBytes()) }
         }
     }
 
